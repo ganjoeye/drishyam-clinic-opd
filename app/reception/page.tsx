@@ -78,6 +78,8 @@ function escapeHtml(value: string) {
 }
 
 export default function ReceptionPage() {
+  const [today, setToday] = useState("");
+
   const [name, setName] = useState("");
   const [age, setAge] = useState("");
   const [gender, setGender] = useState("Male");
@@ -95,6 +97,8 @@ export default function ReceptionPage() {
   const [message, setMessage] = useState("");
 
   const loadData = useCallback(async () => {
+    if (!today) return;
+
     setError("");
 
     try {
@@ -103,7 +107,7 @@ export default function ReceptionPage() {
         .select(
           "id, queue_no, visit_date, status, patients(name, age, gender, phone)"
         )
-        .eq("visit_date", getLocalDate())
+        .eq("visit_date", today)
         .order("queue_no", { ascending: true });
 
       if (visitError) {
@@ -134,7 +138,6 @@ export default function ReceptionPage() {
           vitalRows = (vitalData ?? []) as Vital[];
         }
 
-        // Do not assume that optional prescription columns exist.
         const { data: prescriptionData, error: prescriptionError } =
           await supabase
             .from("prescriptions")
@@ -171,9 +174,15 @@ export default function ReceptionPage() {
     } finally {
       setLoading(false);
     }
+  }, [today]);
+
+  useEffect(() => {
+    setToday(getLocalDate());
   }, []);
 
   useEffect(() => {
+    if (!today) return;
+
     void loadData();
 
     const interval = window.setInterval(() => {
@@ -203,7 +212,7 @@ export default function ReceptionPage() {
       window.clearInterval(interval);
       void supabase.removeChannel(channel);
     };
-  }, [loadData]);
+  }, [today, loadData]);
 
   async function addPatient(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -253,12 +262,12 @@ export default function ReceptionPage() {
         throw new Error("Patient: " + patientError.message);
       }
 
-      const today = getLocalDate();
+      const visitDate = getLocalDate();
 
       const { data: latest, error: latestError } = await supabase
         .from("visits")
         .select("queue_no")
-        .eq("visit_date", today)
+        .eq("visit_date", visitDate)
         .order("queue_no", { ascending: false })
         .limit(1);
 
@@ -272,7 +281,7 @@ export default function ReceptionPage() {
         .from("visits")
         .insert({
           patient_id: patient.id,
-          visit_date: today,
+          visit_date: visitDate,
           queue_no: nextQueue,
           status: "waiting",
         })
@@ -426,7 +435,7 @@ export default function ReceptionPage() {
           <div>
             <h1 className="text-3xl font-bold">Reception Dashboard</h1>
             <p className="mt-1 text-sm text-slate-600">
-              Date: {getLocalDate()}
+              Date: {today || "Loading date..."}
             </p>
           </div>
           <button
@@ -452,7 +461,7 @@ export default function ReceptionPage() {
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold">
-            Add Patient & Vitals
+            Add Patient &amp; Vitals
           </h2>
 
           <form
@@ -564,7 +573,7 @@ export default function ReceptionPage() {
             <div className="sm:col-span-2 lg:col-span-4">
               <button
                 type="submit"
-                disabled={saving}
+                disabled={saving || !today}
                 className="rounded-lg bg-blue-700 px-5 py-3 font-semibold text-white disabled:opacity-50"
               >
                 {saving ? "Saving..." : "Add Patient to Queue"}
@@ -605,7 +614,9 @@ export default function ReceptionPage() {
                   {queue.map((visit) => (
                     <tr key={visit.id} className="border-b last:border-0">
                       <td className="p-3 font-semibold">#{visit.queue_no}</td>
-                      <td className="p-3">{visit.patients?.name ?? "Unknown"}</td>
+                      <td className="p-3">
+                        {visit.patients?.name ?? "Unknown"}
+                      </td>
                       <td className="p-3">
                         {visit.patients?.age ?? "—"} /{" "}
                         {visit.patients?.gender ?? "—"}
