@@ -108,14 +108,11 @@ const COMMON_INVESTIGATIONS = [
   "Pregnancy Test",
 ];
 
-// Browser ki local date YYYY-MM-DD format mein.
 function getLocalDate(): string {
   const date = new Date();
-
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
-
   return `${year}-${month}-${day}`;
 }
 
@@ -153,8 +150,10 @@ export default function DoctorDashboard() {
   const [isLoadingQueue, setIsLoadingQueue] = useState(false);
   const [queueDate, setQueueDate] = useState("");
 
+  // Doctor publishes the webcam stream using this fixed stream ID.
   const roomName = "DrishyamClinicPermanentRoom2026";
-  const videoUrl = `https://vdo.ninja/?room=${roomName}&webcam&quality=0`;
+  const doctorStreamId = "DrishyamDoctor2026";
+  const videoUrl = `https://vdo.ninja/?push=${doctorStreamId}&room=${roomName}&webcam&quality=0`;
 
   const loadDoctorProfile = useCallback(async () => {
     setIsLoadingProfile(true);
@@ -210,7 +209,6 @@ export default function DoctorDashboard() {
     }
   }, []);
 
-  // Sirf browser ki local current date ke visits load hote hain.
   const loadDoctorQueue = useCallback(async () => {
     const today = getLocalDate();
 
@@ -875,6 +873,9 @@ export default function DoctorDashboard() {
 
           <div>
             <h3 className="mb-2 font-semibold">Doctor Live Video Stream</h3>
+            <p className="mb-2 text-xs text-gray-500">
+              Keep this page open during consultation to publish the doctor's webcam stream.
+            </p>
             <iframe
               src={videoUrl}
               title="Doctor Live Video Stream"
