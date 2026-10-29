@@ -1,8 +1,21 @@
-
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
+
+type DoctorProfile = {
+  name: string;
+  qualification: string | null;
+  reg_no: string | null;
+};
+
+type Vital = {
+  id?: string;
+  bp: string | null;
+  weight: number | null;
+  pulse: number | null;
+  spo2: number | null;
+};
 
 type Visit = {
   id: string;
@@ -14,16 +27,10 @@ type Visit = {
     gender: string | null;
     phone: string | null;
   } | null;
-  vitals?: {
-    id?: string;
-    bp: string | null;
-    weight: number | null;
-    pulse: number | null;
-    spo2: number | null;
-  }[];
+  vitals?: Vital[];
 };
 
-type MedItem = {
+type Medicine = {
   name: string;
   dosage: string;
   duration: string;
@@ -31,23 +38,26 @@ type MedItem = {
 };
 
 const COMMON_MEDICINES = [
-  "Tab Paracetamol 650mg",
   "Tab Paracetamol 500mg",
-  "Tab Pantocid 40mg",
-  "Tab Pan-D",
-  "Cap Amoxyclav 625mg",
-  "Tab Azithromycin 500mg",
+  "Tab Paracetamol 650mg",
+  "Tab Ibuprofen 400mg",
+  "Tab Pantoprazole 40mg",
+  "Tab Ondansetron 4mg",
   "Tab Cetirizine 10mg",
-  "Tab Montair-LC",
-  "Tab Meftal-Spas",
-  "Tab Combiflam",
-  "Tab Zero-P",
-  "Syrup Benadryl",
-  "Syrup Ascoril-D",
-  "Tab Ondem 4mg",
-  "Cap Omeprazole 20mg",
-  "Tab Telmikind 40mg",
+  "Tab Levocetirizine 5mg",
+  "Tab Amoxicillin 500mg",
+  "Tab Amoxyclav 625mg",
+  "Tab Azithromycin 500mg",
+  "Tab Cefixime 200mg",
   "Tab Metformin 500mg",
+  "Tab Telmisartan 40mg",
+  "Tab Amlodipine 5mg",
+  "Tab Atorvastatin 10mg",
+  "Tab Rosuvastatin 10mg",
+  "Tab Folic Acid 5mg",
+  "ORS Sachet",
+  "Syrup Paracetamol",
+  "Syrup Cetirizine",
 ];
 
 const COMMON_DIAGNOSES = [
@@ -59,40 +69,152 @@ const COMMON_DIAGNOSES = [
   "Bodyache / Headache",
 ];
 
+const COMMON_INVESTIGATIONS = [
+  "CBC",
+  "ESR",
+  "CRP",
+  "Peripheral Blood Smear",
+  "Reticulocyte Count",
+  "Platelet Count",
+  "PT / INR",
+  "aPTT",
+  "Blood Grouping and Rh Typing",
+  "Fasting Blood Sugar",
+  "Random Blood Sugar (RBS)",
+  "PPBS",
+  "HbA1c",
+  "Liver Function Test (LFT)",
+  "Kidney Function Test (KFT)",
+  "Serum Creatinine",
+  "Blood Urea",
+  "Serum Electrolytes",
+  "Lipid Profile",
+  "Thyroid Profile (TSH)",
+  "Urine Routine and Microscopy",
+  "Urine Culture and Sensitivity",
+  "Blood Culture",
+  "Dengue NS1 Antigen",
+  "Dengue IgM / IgG",
+  "Malaria Antigen",
+  "Vitamin B12",
+  "Vitamin D",
+  "ECG",
+  "Chest X-ray",
+  "Ultrasound Abdomen and Pelvis",
+  "CT Scan",
+  "MRI",
+  "Pregnancy Test",
+];
+
 function getLocalDate() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
-    2,
-    "0"
-  )}-${String(d.getDate()).padStart(2, "0")}`;
+  const date = new Date();
+
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
 }
 
 export default function DoctorDashboard() {
+  const [doctor, setDoctor] = useState<DoctorProfile | null>(null);
   const [visits, setVisits] = useState<Visit[]>([]);
   const [selectedVisit, setSelectedVisit] = useState<Visit | null>(null);
 
   const [diagnosis, setDiagnosis] = useState("");
   const [advice, setAdvice] = useState("");
+
   const [bp, setBp] = useState("");
   const [weight, setWeight] = useState("");
   const [pulse, setPulse] = useState("");
   const [spo2, setSpo2] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
-  const [error, setError] = useState("");
 
-  const [medSearch, setMedSearch] = useState("");
-  const [selectedMedName, setSelectedMedName] = useState("");
+  const [medicineSearch, setMedicineSearch] = useState("");
+  const [selectedMedicine, setSelectedMedicine] = useState("");
   const [dosage, setDosage] = useState("1-0-1");
   const [duration, setDuration] = useState("3 Days");
   const [instruction, setInstruction] = useState("After Food");
-  const [medicineList, setMedicineList] = useState<MedItem[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const [showMedicineSuggestions, setShowMedicineSuggestions] =
+    useState(false);
+
+  const [investigationSearch, setInvestigationSearch] = useState("");
+  const [investigations, setInvestigations] = useState<string[]>([]);
+  const [showInvestigationSuggestions, setShowInvestigationSuggestions] =
+    useState(false);
+
+  const [error, setError] = useState("");
+  const [isSaving, setIsSaving] = useState(false);
+  const [isLoadingProfile, setIsLoadingProfile] = useState(true);
 
   const roomName = "DrishyamClinicPermanentRoom2026";
   const videoUrl = `https://vdo.ninja/?room=${roomName}&webcam&quality=0`;
 
-  async function loadDoctorQueue() {
-    const { data, error: queryError } = await supabase
+  // Load the logged-in doctor's profile.
+  const loadDoctorProfile = useCallback(async () => {
+    setIsLoadingProfile(true);
+    setError("");
+
+    try {
+      const {
+        data: { user },
+        error: authError,
+      } = await supabase.auth.getUser();
+
+      if (authError) {
+        throw new Error("Login verification failed: " + authError.message);
+      }
+
+      if (!user) {
+        throw new Error("Doctor login nahi mila. Please log in again.");
+      }
+
+      console.log("Doctor profile lookup: auth user ID =", user.id);
+
+      const { data, error: profileError } = await supabase
+        .from("doctor_profiles")
+        .select("user_id, name, qualification, reg_no")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      console.log("Doctor profile lookup result:", {
+        authUserId: user.id,
+        data,
+        profileError,
+      });
+
+      if (profileError) {
+        throw new Error(
+          "Doctor profile query failed: " + profileError.message
+        );
+      }
+
+      if (!data) {
+        throw new Error(
+          "Doctor profile row nahi mila. User ID aur Supabase RLS SELECT policy check karein."
+        );
+      }
+
+      setDoctor({
+        name: data.name,
+        qualification: data.qualification,
+        reg_no: data.reg_no,
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unknown profile error";
+
+      console.error("Doctor profile loading error:", err);
+      setError(message);
+      setDoctor(null);
+    } finally {
+      setIsLoadingProfile(false);
+    }
+  }, []);
+
+  // Load today's patient queue.
+  const loadDoctorQueue = useCallback(async () => {
+    const { data, error: queueError } = await supabase
       .from("visits")
       .select(
         "id, queue_no, status, patients(name, age, gender, phone), vitals(id, bp, weight, pulse, spo2)"
@@ -100,22 +222,27 @@ export default function DoctorDashboard() {
       .eq("visit_date", getLocalDate())
       .order("queue_no", { ascending: true });
 
-    if (queryError) {
-      console.error("Doctor queue error:", queryError);
-      setError(queryError.message);
+    if (queueError) {
+      console.error("Queue loading error:", queueError);
+      setError((previous) =>
+        previous
+          ? previous + "\nQueue error: " + queueError.message
+          : "Queue error: " + queueError.message
+      );
       return;
     }
 
     const rows = (data ?? []) as unknown as Visit[];
     setVisits(rows);
 
-    if (selectedVisit) {
-      const found = rows.find((v) => v.id === selectedVisit.id);
-      if (found) setSelectedVisit(found);
-    }
-  }
+    setSelectedVisit((previous) => {
+      if (!previous) return null;
+      return rows.find((visit) => visit.id === previous.id) ?? null;
+    });
+  }, []);
 
   useEffect(() => {
+    void loadDoctorProfile();
     void loadDoctorQueue();
 
     const channel = supabase
@@ -130,58 +257,93 @@ export default function DoctorDashboard() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, []);
+  }, [loadDoctorProfile, loadDoctorQueue]);
 
+  // Populate vitals when a patient is selected.
   useEffect(() => {
-    const v = selectedVisit?.vitals?.[0];
-    setBp(v?.bp ?? "");
-    setWeight(v?.weight != null ? String(v.weight) : "");
-    setPulse(v?.pulse != null ? String(v.pulse) : "");
-    setSpo2(v?.spo2 != null ? String(v.spo2) : "");
+    const vital = selectedVisit?.vitals?.[0];
+
+    setBp(vital?.bp ?? "");
+    setWeight(vital?.weight != null ? String(vital.weight) : "");
+    setPulse(vital?.pulse != null ? String(vital.pulse) : "");
+    setSpo2(vital?.spo2 != null ? String(vital.spo2) : "");
+
+    setDiagnosis("");
+    setAdvice("");
+    setMedicines([]);
+    setInvestigations([]);
+    setMedicineSearch("");
+    setInvestigationSearch("");
   }, [selectedVisit?.id]);
 
-  async function updateStatus(visit: Visit, newStatus: string) {
+  async function updateStatus(visit: Visit, status: string) {
     const { error: statusError } = await supabase
       .from("visits")
-      .update({ status: newStatus })
+      .update({ status })
       .eq("id", visit.id);
 
     if (statusError) {
-      console.error("Status update error:", statusError);
-      alert("Could not update visit status: " + statusError.message);
+      alert("Status update failed: " + statusError.message);
       return;
     }
 
     await loadDoctorQueue();
-    setSelectedVisit({ ...visit, status: newStatus });
   }
 
-  function handleAddMedicine() {
-    const medName = selectedMedName || medSearch.trim();
+  function addMedicine() {
+    const name = selectedMedicine || medicineSearch.trim();
 
-    if (!medName) {
-      alert("Please select or type a medicine name.");
+    if (!name) {
+      alert("Please enter a medicine name.");
       return;
     }
 
-    setMedicineList((previous) => [
+    setMedicines((previous) => [
       ...previous,
-      { name: medName, dosage, duration, instruction },
+      { name, dosage, duration, instruction },
     ]);
-    setMedSearch("");
-    setSelectedMedName("");
-    setShowSuggestions(false);
+
+    setMedicineSearch("");
+    setSelectedMedicine("");
+    setShowMedicineSuggestions(false);
   }
 
-  async function handleSavePrescription() {
+  function addInvestigation(name?: string) {
+    const value = (name ?? investigationSearch).trim();
+
+    if (!value) {
+      alert("Please enter an investigation.");
+      return;
+    }
+
+    if (
+      investigations.some(
+        (item) => item.toLowerCase() === value.toLowerCase()
+      )
+    ) {
+      alert("Investigation already added.");
+      return;
+    }
+
+    setInvestigations((previous) => [...previous, value]);
+    setInvestigationSearch("");
+    setShowInvestigationSuggestions(false);
+  }
+
+  async function savePrescription() {
     if (!selectedVisit || isSaving) return;
+
+    if (!doctor) {
+      alert("Doctor profile load nahi hua. Profile error check karein.");
+      return;
+    }
 
     if (!diagnosis.trim()) {
       alert("Please enter the diagnosis.");
       return;
     }
 
-    if (medicineList.length === 0) {
+    if (medicines.length === 0) {
       alert("Please add at least one medicine.");
       return;
     }
@@ -190,7 +352,6 @@ export default function DoctorDashboard() {
     setError("");
 
     try {
-      // STEP 1: Save vitals, if entered.
       const existingVitalId = selectedVisit.vitals?.[0]?.id;
 
       if (bp || weight || pulse || spo2) {
@@ -210,15 +371,16 @@ export default function DoctorDashboard() {
           : await supabase.from("vitals").insert(vitalData);
 
         if (vitalResult.error) {
-          throw new Error("Vitals save failed: " + vitalResult.error.message);
+          throw new Error(
+            "Vitals save failed: " + vitalResult.error.message
+          );
         }
       }
 
-      // STEP 2: Insert prescription and check the actual database response.
-      const formattedMedicines = medicineList
+      const formattedMedicines = medicines
         .map(
-          (m, index) =>
-            `${index + 1}. ${m.name} -- [${m.dosage}] -- ${m.duration} (${m.instruction})`
+          (medicine, index) =>
+            `${index + 1}. ${medicine.name} -- [${medicine.dosage}] -- ${medicine.duration} (${medicine.instruction})`
         )
         .join("\n");
 
@@ -227,83 +389,118 @@ export default function DoctorDashboard() {
           .from("prescriptions")
           .insert({
             visit_id: selectedVisit.id,
+            doctor_name: doctor.name,
+            doctor_qualification: doctor.qualification,
+            doctor_reg_no: doctor.reg_no,
             diagnosis: diagnosis.trim(),
             medicines: formattedMedicines,
+            investigations: investigations.join("\n"),
             advice: advice.trim(),
           })
           .select("id")
           .single();
 
       if (prescriptionError) {
-        console.error("Prescription insert failed:", prescriptionError);
         throw new Error(
-          "Prescription was NOT saved: " + prescriptionError.message
+          "Prescription save failed: " + prescriptionError.message
         );
       }
 
       if (!savedPrescription?.id) {
-        throw new Error(
-          "The database did not confirm the saved prescription."
-        );
+        throw new Error("Database did not confirm the saved prescription.");
       }
 
-      // STEP 3: Update visit status only after prescription is saved.
       const { error: statusError } = await supabase
         .from("visits")
         .update({ status: "completed" })
         .eq("id", selectedVisit.id);
 
       if (statusError) {
-        console.error("Visit status update failed:", statusError);
         alert(
-          "Prescription saved, but visit status update failed:\n" +
+          "Prescription saved, but status update failed: " +
             statusError.message
         );
       } else {
-        alert("Prescription saved successfully and visit marked completed.");
+        alert("Prescription saved successfully!");
       }
 
       setDiagnosis("");
-      setMedicineList([]);
       setAdvice("");
+      setMedicines([]);
+      setInvestigations([]);
       setSelectedVisit(null);
+
       await loadDoctorQueue();
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unexpected error occurred.";
 
+      console.error("Prescription saving error:", err);
       setError(message);
-      console.error("Save prescription error:", err);
       alert(message);
     } finally {
       setIsSaving(false);
     }
   }
 
-  const filteredMedicines = COMMON_MEDICINES.filter((m) =>
-    m.toLowerCase().includes(medSearch.toLowerCase())
+  const filteredMedicines = COMMON_MEDICINES.filter((medicine) =>
+    medicine.toLowerCase().includes(medicineSearch.toLowerCase())
+  );
+
+  const filteredInvestigations = COMMON_INVESTIGATIONS.filter((item) =>
+    item.toLowerCase().includes(investigationSearch.toLowerCase())
   );
 
   return (
-    <main className="max-w-7xl mx-auto p-6 space-y-6">
-      <h1 className="text-2xl font-bold text-gray-800">
-        Doctor Dashboard & Smart OPD Desk
-      </h1>
+    <main className="mx-auto max-w-7xl space-y-6 p-6">
+      <header className="rounded-xl border bg-white p-5">
+        <h1 className="text-2xl font-bold text-gray-800">
+          {doctor ? `Welcome, ${doctor.name}` : "Doctor Dashboard"}
+        </h1>
+
+        <p className="mt-1 text-sm text-gray-600">
+          Doctor Dashboard &amp; Smart OPD Desk
+        </p>
+
+        {doctor && (
+          <div className="mt-3 space-y-1 text-sm text-gray-700">
+            <p>
+              <strong>Qualification:</strong>{" "}
+              {doctor.qualification || "Not added"}
+            </p>
+            <p>
+              <strong>Registration No.:</strong> {doctor.reg_no || "Not added"}
+            </p>
+          </div>
+        )}
+
+        {isLoadingProfile && (
+          <p className="mt-3 text-sm text-blue-700">
+            Loading doctor profile...
+          </p>
+        )}
+
+        <button
+          type="button"
+          onClick={() => void loadDoctorProfile()}
+          className="mt-3 rounded bg-gray-100 px-3 py-2 text-sm hover:bg-gray-200"
+        >
+          Reload Doctor Profile
+        </button>
+      </header>
 
       {error && (
-        <div className="bg-red-50 border border-red-300 text-red-800 p-3 rounded-lg">
+        <div className="whitespace-pre-wrap rounded-lg border border-red-300 bg-red-50 p-3 text-red-800">
           {error}
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <section className="bg-white border rounded-xl p-4 space-y-3">
-          <h2 className="font-bold text-lg border-b pb-2">
-            Today&apos;s Patients
-          </h2>
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+        <section className="space-y-3 rounded-xl border bg-white p-4">
+          <h2 className="border-b pb-2 text-lg font-bold">Today&apos;s Patients</h2>
 
           {visits.length === 0 && (
-            <p className="text-gray-500 text-sm">No patients in queue.</p>
+            <p className="text-sm text-gray-500">No patients in today&apos;s queue.</p>
           )}
 
           {visits.map((visit) => (
@@ -311,186 +508,333 @@ export default function DoctorDashboard() {
               key={visit.id}
               type="button"
               onClick={() => setSelectedVisit(visit)}
-              className={`block w-full text-left p-3 rounded-lg border ${
+              className={`block w-full rounded-lg border p-3 text-left ${
                 selectedVisit?.id === visit.id
                   ? "border-blue-600 bg-blue-50"
                   : "hover:bg-gray-50"
               }`}
             >
               <strong>
-                #{visit.queue_no} {visit.patients?.name ?? "Unknown"}
+                #{visit.queue_no} {visit.patients?.name ?? "Unknown Patient"}
               </strong>
-              <p className="text-xs mt-1">{visit.status}</p>
+              <p className="mt-1 text-xs">Status: {visit.status}</p>
             </button>
           ))}
+
+          <button
+            type="button"
+            onClick={() => void loadDoctorQueue()}
+            className="w-full rounded bg-gray-100 p-2 text-sm hover:bg-gray-200"
+          >
+            Refresh Queue
+          </button>
         </section>
 
-        <section className="bg-white border rounded-xl p-5 space-y-5 md:col-span-2">
+        <section className="space-y-5 rounded-xl border bg-white p-5 md:col-span-2">
           {selectedVisit ? (
             <>
               <div>
                 <h2 className="text-xl font-bold">
                   Token #{selectedVisit.queue_no} —{" "}
-                  {selectedVisit.patients?.name}
+                  {selectedVisit.patients?.name ?? "Unknown Patient"}
                 </h2>
+
                 <p className="text-sm text-gray-500">
                   {selectedVisit.patients?.gender ?? "N/A"},{" "}
                   {selectedVisit.patients?.age ?? "N/A"} years | Phone:{" "}
                   {selectedVisit.patients?.phone ?? "N/A"}
                 </p>
+
                 <button
                   type="button"
                   onClick={() =>
                     void updateStatus(selectedVisit, "in-consultation")
                   }
-                  className="mt-3 bg-blue-600 text-white px-4 py-2 rounded-lg"
+                  className="mt-3 rounded bg-blue-600 px-4 py-2 text-white"
                 >
                   Call In
                 </button>
               </div>
 
-              <div className="bg-blue-50 border rounded-xl p-4">
-                <h3 className="font-bold mb-3">Patient Vitals</h3>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                  <input className="border p-2 rounded" placeholder="BP" value={bp} onChange={(e) => setBp(e.target.value)} />
-                  <input className="border p-2 rounded" type="number" placeholder="Weight (kg)" value={weight} onChange={(e) => setWeight(e.target.value)} />
-                  <input className="border p-2 rounded" type="number" placeholder="Pulse" value={pulse} onChange={(e) => setPulse(e.target.value)} />
-                  <input className="border p-2 rounded" type="number" placeholder="SpO2" value={spo2} onChange={(e) => setSpo2(e.target.value)} />
+              <div className="rounded-xl border bg-blue-50 p-4">
+                <h3 className="mb-3 font-bold">Patient Vitals</h3>
+
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                  <input
+                    className="min-w-0 rounded border p-2"
+                    placeholder="BP (e.g. 120/80)"
+                    value={bp}
+                    onChange={(event) => setBp(event.target.value)}
+                  />
+
+                  <input
+                    className="min-w-0 rounded border p-2"
+                    type="number"
+                    placeholder="Weight (kg)"
+                    value={weight}
+                    onChange={(event) => setWeight(event.target.value)}
+                  />
+
+                  <input
+                    className="min-w-0 rounded border p-2"
+                    type="number"
+                    placeholder="Pulse"
+                    value={pulse}
+                    onChange={(event) => setPulse(event.target.value)}
+                  />
+
+                  <input
+                    className="min-w-0 rounded border p-2"
+                    type="number"
+                    placeholder="SpO2 (%)"
+                    value={spo2}
+                    onChange={(event) => setSpo2(event.target.value)}
+                  />
                 </div>
+
+                <p className="mt-2 text-xs text-gray-600">
+                  Verify all vital readings before saving.
+                </p>
               </div>
 
-              <div className="bg-slate-50 border rounded-xl p-4 space-y-4">
+              <div className="space-y-5 rounded-xl border bg-slate-50 p-4">
                 <h3 className="font-bold">Smart Prescription Builder</h3>
 
                 <div>
                   <label className="text-sm font-semibold">Diagnosis</label>
                   <input
-                    className="w-full border p-2 rounded mt-1"
+                    className="mt-1 w-full rounded border p-2"
                     value={diagnosis}
-                    onChange={(e) => setDiagnosis(e.target.value)}
+                    onChange={(event) => setDiagnosis(event.target.value)}
                     placeholder="Enter diagnosis"
                   />
-                  <div className="flex flex-wrap gap-2 mt-2">
-                    {COMMON_DIAGNOSES.map((d) => (
+
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {COMMON_DIAGNOSES.map((item) => (
                       <button
-                        key={d}
+                        key={item}
                         type="button"
-                        onClick={() => setDiagnosis(d)}
-                        className="text-xs bg-gray-200 px-2 py-1 rounded-full"
+                        onClick={() => setDiagnosis(item)}
+                        className="rounded-full bg-gray-200 px-2 py-1 text-xs"
                       >
-                        {d}
+                        {item}
                       </button>
                     ))}
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <label className="text-sm font-semibold">Medicine</label>
+                  <label className="text-sm font-semibold">Medicines</label>
+
                   <input
-                    className="w-full border p-2 rounded"
-                    value={medSearch}
-                    onChange={(e) => {
-                      setMedSearch(e.target.value);
-                      setSelectedMedName("");
-                      setShowSuggestions(true);
+                    className="w-full rounded border p-2"
+                    value={medicineSearch}
+                    onChange={(event) => {
+                      setMedicineSearch(event.target.value);
+                      setSelectedMedicine("");
+                      setShowMedicineSuggestions(true);
                     }}
-                    onFocus={() => setShowSuggestions(true)}
-                    placeholder="Search or type medicine"
+                    onFocus={() => setShowMedicineSuggestions(true)}
+                    placeholder="Search or type medicine name"
                   />
 
-                  {showSuggestions && medSearch.trim() && (
-                    <div className="border bg-white rounded max-h-40 overflow-y-auto">
+                  {showMedicineSuggestions && medicineSearch.trim() && (
+                    <div className="max-h-48 overflow-y-auto rounded border bg-white">
                       {(filteredMedicines.length
                         ? filteredMedicines
-                        : [medSearch.trim()]
-                      ).map((m) => (
+                        : [medicineSearch.trim()]
+                      ).map((item) => (
                         <button
-                          key={m}
+                          key={item}
                           type="button"
-                          className="block w-full text-left p-2 hover:bg-blue-50"
+                          className="block w-full p-2 text-left hover:bg-blue-50"
                           onClick={() => {
-                            setSelectedMedName(m);
-                            setMedSearch(m);
-                            setShowSuggestions(false);
+                            setSelectedMedicine(item);
+                            setMedicineSearch(item);
+                            setShowMedicineSuggestions(false);
                           }}
                         >
-                          {m}
+                          {item}
                         </button>
                       ))}
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                    <select className="border p-2 rounded" value={dosage} onChange={(e) => setDosage(e.target.value)}>
+                  <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+                    <select
+                      className="rounded border p-2"
+                      value={dosage}
+                      onChange={(event) => setDosage(event.target.value)}
+                    >
                       <option value="1-0-1">1-0-1</option>
                       <option value="1-0-0">1-0-0</option>
                       <option value="0-0-1">0-0-1</option>
                       <option value="1-1-1">1-1-1</option>
                       <option value="SOS">SOS</option>
+                      <option value="As directed">As directed</option>
                     </select>
-                    <select className="border p-2 rounded" value={duration} onChange={(e) => setDuration(e.target.value)}>
+
+                    <select
+                      className="rounded border p-2"
+                      value={duration}
+                      onChange={(event) => setDuration(event.target.value)}
+                    >
                       <option>3 Days</option>
                       <option>5 Days</option>
                       <option>7 Days</option>
                       <option>10 Days</option>
+                      <option>14 Days</option>
                       <option>1 Month</option>
+                      <option>As directed</option>
                     </select>
-                    <select className="border p-2 rounded" value={instruction} onChange={(e) => setInstruction(e.target.value)}>
+
+                    <select
+                      className="rounded border p-2"
+                      value={instruction}
+                      onChange={(event) => setInstruction(event.target.value)}
+                    >
                       <option>After Food</option>
                       <option>Before Food</option>
                       <option>With Water</option>
                       <option>At Bedtime</option>
+                      <option>Empty Stomach</option>
+                      <option>As directed</option>
                     </select>
                   </div>
 
-                  <button type="button" onClick={handleAddMedicine} className="w-full bg-blue-600 text-white p-2 rounded">
+                  <button
+                    type="button"
+                    onClick={addMedicine}
+                    className="w-full rounded bg-blue-600 p-2 text-white"
+                  >
                     + Add Medicine to List
                   </button>
                 </div>
 
-                {medicineList.map((m, i) => (
-                  <div key={`${m.name}-${i}`} className="flex justify-between gap-2 border-b py-2 text-sm">
+                {medicines.map((medicine, index) => (
+                  <div
+                    key={`${medicine.name}-${index}`}
+                    className="flex justify-between gap-2 border-b py-2 text-sm"
+                  >
                     <span>
-                      {i + 1}. {m.name} — {m.dosage} — {m.duration} — {m.instruction}
+                      {index + 1}. {medicine.name} — {medicine.dosage} —{" "}
+                      {medicine.duration} — {medicine.instruction}
                     </span>
-                    <button type="button" className="text-red-600" onClick={() => setMedicineList((old) => old.filter((_, index) => index !== i))}>
+
+                    <button
+                      type="button"
+                      className="text-red-600"
+                      onClick={() =>
+                        setMedicines((previous) =>
+                          previous.filter((_, i) => i !== index)
+                        )
+                      }
+                    >
                       Remove
                     </button>
                   </div>
                 ))}
 
+                <div className="space-y-3 border-t pt-4">
+                  <h3 className="text-lg font-bold">Investigations</h3>
+
+                  <input
+                    className="w-full rounded border p-2"
+                    value={investigationSearch}
+                    onChange={(event) => {
+                      setInvestigationSearch(event.target.value);
+                      setShowInvestigationSuggestions(true);
+                    }}
+                    onFocus={() => setShowInvestigationSuggestions(true)}
+                    placeholder="Search CBC, LFT, KFT, HbA1c, ECG..."
+                  />
+
+                  {showInvestigationSuggestions &&
+                    investigationSearch.trim() && (
+                      <div className="max-h-48 overflow-y-auto rounded border bg-white">
+                        {(filteredInvestigations.length
+                          ? filteredInvestigations
+                          : [investigationSearch.trim()]
+                        ).map((item) => (
+                          <button
+                            key={item}
+                            type="button"
+                            className="block w-full p-2 text-left hover:bg-blue-50"
+                            onClick={() => addInvestigation(item)}
+                          >
+                            {item}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+
+                  <button
+                    type="button"
+                    onClick={() => addInvestigation()}
+                    className="w-full rounded bg-indigo-600 p-2 text-white"
+                  >
+                    + Add Investigation
+                  </button>
+
+                  {investigations.map((item, index) => (
+                    <div
+                      key={`${item}-${index}`}
+                      className="flex items-center justify-between gap-3 rounded border p-2"
+                    >
+                      <span>
+                        {index + 1}. {item}
+                      </span>
+
+                      <button
+                        type="button"
+                        className="text-red-600"
+                        onClick={() =>
+                          setInvestigations((previous) =>
+                            previous.filter((_, i) => i !== index)
+                          )
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
                 <div>
                   <label className="text-sm font-semibold">Advice / Notes</label>
-                  <input
-                    className="w-full border p-2 rounded mt-1"
+                  <textarea
+                    className="mt-1 w-full rounded border p-2"
+                    rows={3}
                     value={advice}
-                    onChange={(e) => setAdvice(e.target.value)}
+                    onChange={(event) => setAdvice(event.target.value)}
                     placeholder="Advice for patient"
                   />
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => void handleSavePrescription()}
-                  disabled={isSaving}
-                  className="w-full bg-emerald-600 text-white p-3 rounded-xl font-bold disabled:opacity-50"
+                  onClick={() => void savePrescription()}
+                  disabled={isSaving || !doctor}
+                  className="w-full rounded-xl bg-emerald-600 p-3 font-bold text-white disabled:opacity-50"
                 >
-                  {isSaving ? "Saving..." : "Save Prescription & Send to Reception"}
+                  {isSaving
+                    ? "Saving..."
+                    : "Save Prescription & Send to Reception"}
                 </button>
               </div>
             </>
           ) : (
-            <p className="bg-amber-50 p-4 rounded-lg">
+            <p className="rounded-lg bg-amber-50 p-4">
               Select a patient from the queue to write a prescription.
             </p>
           )}
 
           <div>
-            <h3 className="font-semibold mb-2">Doctor Live Video Stream</h3>
+            <h3 className="mb-2 font-semibold">Doctor Live Video Stream</h3>
             <iframe
               src={videoUrl}
               title="Doctor Live Video Stream"
-              className="w-full h-[280px] bg-black rounded-xl border-0"
+              className="h-[280px] w-full rounded-xl border-0 bg-black"
               allow="camera; microphone; display-capture; autoplay; encrypted-media"
             />
           </div>
