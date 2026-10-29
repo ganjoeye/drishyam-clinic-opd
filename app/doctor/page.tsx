@@ -1,3 +1,4 @@
+
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
@@ -21,6 +22,7 @@ type Visit = {
   id: string;
   queue_no: number;
   status: string;
+  visit_date?: string;
   patients: {
     name: string;
     age: number | null;
@@ -106,14 +108,15 @@ const COMMON_INVESTIGATIONS = [
   "Pregnancy Test",
 ];
 
-function getLocalDate() {
+// Browser ki local date YYYY-MM-DD format mein.
+function getLocalDate(): string {
   const date = new Date();
 
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("-");
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }
 
 export default function DoctorDashboard() {
@@ -144,16 +147,17 @@ export default function DoctorDashboard() {
     useState(false);
 
   const [error, setError] = useState("");
+  const [queueMessage, setQueueMessage] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
+  const [isLoadingQueue, setIsLoadingQueue] = useState(false);
+  const [queueDate, setQueueDate] = useState("");
 
   const roomName = "DrishyamClinicPermanentRoom2026";
   const videoUrl = `https://vdo.ninja/?room=${roomName}&webcam&quality=0`;
 
-  // Load the logged-in doctor's profile.
   const loadDoctorProfile = useCallback(async () => {
     setIsLoadingProfile(true);
-    setError("");
 
     try {
       const {
@@ -169,19 +173,11 @@ export default function DoctorDashboard() {
         throw new Error("Doctor login nahi mila. Please log in again.");
       }
 
-      console.log("Doctor profile lookup: auth user ID =", user.id);
-
       const { data, error: profileError } = await supabase
         .from("doctor_profiles")
         .select("user_id, name, qualification, reg_no")
         .eq("user_id", user.id)
         .maybeSingle();
-
-      console.log("Doctor profile lookup result:", {
-        authUserId: user.id,
-        data,
-        profileError,
-      });
 
       if (profileError) {
         throw new Error(
@@ -191,7 +187,7 @@ export default function DoctorDashboard() {
 
       if (!data) {
         throw new Error(
-          "Doctor profile row nahi mila. User ID aur Supabase RLS SELECT policy check karein."
+          "Doctor profile row nahi mila. Supabase mein doctor_profiles aur RLS policy check karein."
         );
       }
 
@@ -200,6 +196,8 @@ export default function DoctorDashboard() {
         qualification: data.qualification,
         reg_no: data.reg_no,
       });
+
+      setError("");
     } catch (err) {
       const message =
         err instanceof Error ? err.message : "Unknown profile error";
@@ -212,33 +210,57 @@ export default function DoctorDashboard() {
     }
   }, []);
 
-  // Load today's patient queue.
+  // Sirf browser ki local current date ke visits load hote hain.
   const loadDoctorQueue = useCallback(async () => {
-    const { data, error: queueError } = await supabase
-      .from("visits")
-      .select(
-        "id, queue_no, status, patients(name, age, gender, phone), vitals(id, bp, weight, pulse, spo2)"
-      )
-      .eq("visit_date", getLocalDate())
-      .order("queue_no", { ascending: true });
+    const today = getLocalDate();
 
-    if (queueError) {
-      console.error("Queue loading error:", queueError);
-      setError((previous) =>
-        previous
-          ? previous + "\nQueue error: " + queueError.message
-          : "Queue error: " + queueError.message
-      );
-      return;
+    setQueueDate(today);
+    setIsLoadingQueue(true);
+    setQueueMessage("");
+
+    try {
+      const { data, error: queueError } = await supabase
+        .from("visits")
+        .select(
+          "id, queue_no, status, visit_date, patients(name, age, gender, phone), vitals(id, bp, weight, pulse, spo2)"
+        )
+        .eq("visit_date", today)
+        .order("queue_no", { ascending: true });
+
+      if (queueError) {
+        console.error("Queue loading error:", queueError);
+        setQueueMessage("Queue load nahi hui: " + queueError.message);
+        return;
+      }
+
+      const rows = (data ?? []) as unknown as Visit[];
+
+      console.log("Doctor queue date:", today);
+      console.log("Doctor queue records:", rows.length);
+
+      setVisits(rows);
+
+      setSelectedVisit((previous) => {
+        if (!previous) return null;
+        return rows.find((visit) => visit.id === previous.id) ?? null;
+      });
+
+      if (rows.length === 0) {
+        setQueueMessage(
+          `Aaj (${today}) ke liye koi visit nahi mili. Reception mein visit_date check karein.`
+        );
+      } else {
+        setQueueMessage("");
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Unknown queue error";
+
+      console.error("Queue loading failed:", err);
+      setQueueMessage("Queue load nahi hui: " + message);
+    } finally {
+      setIsLoadingQueue(false);
     }
-
-    const rows = (data ?? []) as unknown as Visit[];
-    setVisits(rows);
-
-    setSelectedVisit((previous) => {
-      if (!previous) return null;
-      return rows.find((visit) => visit.id === previous.id) ?? null;
-    });
   }, []);
 
   useEffect(() => {
@@ -259,7 +281,6 @@ export default function DoctorDashboard() {
     };
   }, [loadDoctorProfile, loadDoctorQueue]);
 
-  // Populate vitals when a patient is selected.
   useEffect(() => {
     const vital = selectedVisit?.vitals?.[0];
 
@@ -273,7 +294,10 @@ export default function DoctorDashboard() {
     setMedicines([]);
     setInvestigations([]);
     setMedicineSearch("");
+    setSelectedMedicine("");
     setInvestigationSearch("");
+    setShowMedicineSuggestions(false);
+    setShowInvestigationSuggestions(false);
   }, [selectedVisit?.id]);
 
   async function updateStatus(visit: Visit, status: string) {
@@ -469,7 +493,8 @@ export default function DoctorDashboard() {
               {doctor.qualification || "Not added"}
             </p>
             <p>
-              <strong>Registration No.:</strong> {doctor.reg_no || "Not added"}
+              <strong>Registration No.:</strong>{" "}
+              {doctor.reg_no || "Not added"}
             </p>
           </div>
         )}
@@ -497,10 +522,28 @@ export default function DoctorDashboard() {
 
       <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
         <section className="space-y-3 rounded-xl border bg-white p-4">
-          <h2 className="border-b pb-2 text-lg font-bold">Today&apos;s Patients</h2>
+          <h2 className="border-b pb-2 text-lg font-bold">
+            Today&apos;s Patients
+          </h2>
 
-          {visits.length === 0 && (
-            <p className="text-sm text-gray-500">No patients in today&apos;s queue.</p>
+          <p className="text-xs text-gray-500">
+            Queue date: {queueDate || "Loading..."}
+          </p>
+
+          {isLoadingQueue && (
+            <p className="text-sm text-blue-700">Loading queue...</p>
+          )}
+
+          {queueMessage && (
+            <p className="whitespace-pre-wrap rounded bg-amber-50 p-3 text-sm text-amber-900">
+              {queueMessage}
+            </p>
+          )}
+
+          {visits.length === 0 && !isLoadingQueue && (
+            <p className="text-sm text-gray-500">
+              No patients in today&apos;s queue.
+            </p>
           )}
 
           {visits.map((visit) => (
@@ -524,9 +567,10 @@ export default function DoctorDashboard() {
           <button
             type="button"
             onClick={() => void loadDoctorQueue()}
-            className="w-full rounded bg-gray-100 p-2 text-sm hover:bg-gray-200"
+            disabled={isLoadingQueue}
+            className="w-full rounded bg-gray-100 p-2 text-sm hover:bg-gray-200 disabled:opacity-50"
           >
-            Refresh Queue
+            {isLoadingQueue ? "Refreshing..." : "Refresh Queue"}
           </button>
         </section>
 

@@ -5,6 +5,8 @@ import { useCallback, useEffect, useState } from "react";
 import { supabase } from "../../lib/supabase";
 
 type Patient = {
+  id: string;
+  patient_code: string;
   name: string;
   age: number | null;
   gender: string | null;
@@ -18,15 +20,21 @@ type Vital = {
   weight: number | null;
   pulse: number | null;
   spo2: number | null;
+  temperature?: number | null;
 };
 
 type Prescription = {
   id?: string;
   visit_id?: string;
   diagnosis?: string | null;
-  medicines?: string | null;
+  medicines?: unknown;
+  investigations?: string | null;
   advice?: string | null;
-  [key: string]: unknown;
+  notes?: string | null;
+  doctor_name?: string | null;
+  doctor_qualification?: string | null;
+  doctor_reg_no?: string | null;
+  created_at?: string;
 };
 
 type Visit = {
@@ -48,23 +56,15 @@ function getLocalDate() {
 }
 
 function readableError(err: unknown) {
-  if (
-    typeof err === "object" &&
-    err !== null &&
-    "message" in err
-  ) {
+  if (typeof err === "object" && err !== null && "message" in err) {
     return String(err.message);
   }
   return String(err);
 }
 
 function safeText(value: unknown): string {
-  if (value === null || value === undefined || value === "") {
-    return "—";
-  }
-  if (typeof value === "object") {
-    return JSON.stringify(value);
-  }
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "object") return JSON.stringify(value, null, 2);
   return String(value);
 }
 
@@ -96,23 +96,28 @@ export default function ReceptionPage() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchResults, setSearchResults] = useState<Patient[]>([]);
+  const [searching, setSearching] = useState(false);
+  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
+
+  const [historyPatient, setHistoryPatient] = useState<Patient | null>(null);
+  const [historyVisits, setHistoryVisits] = useState<Visit[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
   const loadData = useCallback(async () => {
     if (!today) return;
-
-    setError("");
 
     try {
       const { data: visitData, error: visitError } = await supabase
         .from("visits")
         .select(
-          "id, queue_no, visit_date, status, patients(name, age, gender, phone)"
+          "id, queue_no, visit_date, status, patients(id, patient_code, name, age, gender, phone)"
         )
         .eq("visit_date", today)
         .order("queue_no", { ascending: true });
 
-      if (visitError) {
-        throw new Error("Visits: " + visitError.message);
-      }
+      if (visitError) throw new Error("Visits: " + visitError.message);
 
       const visits = (visitData ?? []) as unknown as Omit<
         Visit,
@@ -120,23 +125,17 @@ export default function ReceptionPage() {
       >[];
 
       const ids = visits.map((v) => v.id);
-
       let vitalRows: Vital[] = [];
       let prescriptionRows: Prescription[] = [];
-      const secondaryErrors: string[] = [];
 
       if (ids.length > 0) {
         const { data: vitalData, error: vitalError } = await supabase
           .from("vitals")
-          .select("id, visit_id, bp, weight, pulse, spo2")
+          .select("id, visit_id, bp, weight, pulse, spo2, temperature")
           .in("visit_id", ids);
 
-        if (vitalError) {
-          console.error("Vitals query error:", vitalError);
-          secondaryErrors.push("Vitals: " + vitalError.message);
-        } else {
-          vitalRows = (vitalData ?? []) as Vital[];
-        }
+        if (vitalError) throw new Error("Vitals: " + vitalError.message);
+        vitalRows = (vitalData ?? []) as Vital[];
 
         const { data: prescriptionData, error: prescriptionError } =
           await supabase
@@ -145,30 +144,24 @@ export default function ReceptionPage() {
             .in("visit_id", ids);
 
         if (prescriptionError) {
-          console.error("Prescription query error:", prescriptionError);
-          secondaryErrors.push(
-            "Prescriptions: " + prescriptionError.message
-          );
-        } else {
-          prescriptionRows = (prescriptionData ?? []) as Prescription[];
+          throw new Error("Prescriptions: " + prescriptionError.message);
         }
+
+        prescriptionRows = (prescriptionData ?? []) as Prescription[];
       }
 
-      const result: Visit[] = visits.map((visit) => ({
-        ...visit,
-        vitals:
-          vitalRows.find((v) => v.visit_id === visit.id) ?? null,
-        prescriptions: prescriptionRows.filter(
-          (p) => p.visit_id === visit.id
-        ),
-      }));
+      setQueue(
+        visits.map((visit) => ({
+          ...visit,
+          vitals: vitalRows.find((v) => v.visit_id === visit.id) ?? null,
+          prescriptions: prescriptionRows.filter(
+            (p) => p.visit_id === visit.id
+          ),
+        }))
+      );
 
-      setQueue(result);
-
-      if (secondaryErrors.length > 0) {
-        setError(secondaryErrors.join(" | "));
-      }
-    } catch (err: unknown) {
+      setError("");
+    } catch (err) {
       console.error("Reception load error:", err);
       setError(readableError(err));
     } finally {
@@ -185,9 +178,7 @@ export default function ReceptionPage() {
 
     void loadData();
 
-    const interval = window.setInterval(() => {
-      void loadData();
-    }, 15000);
+    const interval = window.setInterval(() => void loadData(), 15000);
 
     const channel = supabase
       .channel("reception-live")
@@ -213,6 +204,206 @@ export default function ReceptionPage() {
       void supabase.removeChannel(channel);
     };
   }, [today, loadData]);
+
+  function resetVitals() {
+    setBp("");
+    setPulse("");
+    setSpo2("");
+    setWeight("");
+  }
+
+  function clearSelectedPatient() {
+    setSelectedPatient(null);
+    setName("");
+    setAge("");
+    setGender("Male");
+    setPhone("");
+    resetVitals();
+  }
+
+  async function searchPatients() {
+    const term = searchTerm.trim();
+
+    setError("");
+    setMessage("");
+    setSelectedPatient(null);
+
+    if (!term) {
+      setError("Patient ID, mobile number, ya name enter karo.");
+      return;
+    }
+
+    setSearching(true);
+
+    try {
+      const [codeResult, phoneResult, nameResult] = await Promise.all([
+        supabase
+          .from("patients")
+          .select("id, patient_code, name, age, gender, phone")
+          .ilike("patient_code", `%${term}%`)
+          .limit(20),
+        supabase
+          .from("patients")
+          .select("id, patient_code, name, age, gender, phone")
+          .ilike("phone", `%${term}%`)
+          .limit(20),
+        supabase
+          .from("patients")
+          .select("id, patient_code, name, age, gender, phone")
+          .ilike("name", `%${term}%`)
+          .limit(20),
+      ]);
+
+      const queryError =
+        codeResult.error || phoneResult.error || nameResult.error;
+
+      if (queryError) throw new Error(queryError.message);
+
+      const combined = [
+        ...(codeResult.data ?? []),
+        ...(phoneResult.data ?? []),
+        ...(nameResult.data ?? []),
+      ] as Patient[];
+
+      const unique = Array.from(
+        new Map(combined.map((p) => [p.id, p])).values()
+      );
+
+      setSearchResults(unique);
+
+      if (unique.length === 0) {
+        setMessage(
+          "Existing patient nahi mila. Neeche form se new patient register kar sakte ho."
+        );
+      }
+    } catch (err) {
+      setError("Patient search failed: " + readableError(err));
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function selectExistingPatient(patient: Patient) {
+    setSelectedPatient(patient);
+    setName(patient.name);
+    setAge(patient.age === null ? "" : String(patient.age));
+    setGender(patient.gender || "Other");
+    setPhone(patient.phone || "");
+    setSearchResults([]);
+    setMessage(`Selected patient: ${patient.patient_code}`);
+    setError("");
+  }
+
+  async function loadPatientHistory(patient: Patient) {
+    setHistoryPatient(patient);
+    setHistoryVisits([]);
+    setHistoryLoading(true);
+    setError("");
+
+    try {
+      const { data: visitData, error: visitError } = await supabase
+        .from("visits")
+        .select(
+          "id, queue_no, visit_date, status, patients(id, patient_code, name, age, gender, phone)"
+        )
+        .eq("patient_id", patient.id)
+        .order("visit_date", { ascending: false });
+
+      if (visitError) throw new Error(visitError.message);
+
+      const visits = (visitData ?? []) as unknown as Omit<
+        Visit,
+        "vitals" | "prescriptions"
+      >[];
+
+      const ids = visits.map((v) => v.id);
+      let vitalRows: Vital[] = [];
+      let prescriptionRows: Prescription[] = [];
+
+      if (ids.length > 0) {
+        const [vitalsResult, prescriptionsResult] = await Promise.all([
+          supabase
+            .from("vitals")
+            .select("id, visit_id, bp, weight, pulse, spo2, temperature")
+            .in("visit_id", ids),
+          supabase.from("prescriptions").select("*").in("visit_id", ids),
+        ]);
+
+        if (vitalsResult.error) throw new Error(vitalsResult.error.message);
+
+        if (prescriptionsResult.error) {
+          throw new Error(prescriptionsResult.error.message);
+        }
+
+        vitalRows = (vitalsResult.data ?? []) as Vital[];
+        prescriptionRows = (prescriptionsResult.data ?? []) as Prescription[];
+      }
+
+      setHistoryVisits(
+        visits.map((visit) => ({
+          ...visit,
+          vitals: vitalRows.find((v) => v.visit_id === visit.id) ?? null,
+          prescriptions: prescriptionRows.filter(
+            (p) => p.visit_id === visit.id
+          ),
+        }))
+      );
+    } catch (err) {
+      setError("Patient history failed: " + readableError(err));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  async function createVisit(patientId: string) {
+    const visitDate = getLocalDate();
+
+    const { data: latest, error: latestError } = await supabase
+      .from("visits")
+      .select("queue_no")
+      .eq("visit_date", visitDate)
+      .order("queue_no", { ascending: false })
+      .limit(1);
+
+    if (latestError) throw new Error("Queue number: " + latestError.message);
+
+    const nextQueue = (latest?.[0]?.queue_no ?? 0) + 1;
+
+    const { data: visit, error: visitError } = await supabase
+      .from("visits")
+      .insert({
+        patient_id: patientId,
+        visit_date: visitDate,
+        queue_no: nextQueue,
+        status: "waiting",
+      })
+      .select("id")
+      .single();
+
+    if (visitError) throw new Error("Visit: " + visitError.message);
+
+    const hasVitals = Boolean(
+      bp.trim() || pulse.trim() || spo2.trim() || weight.trim()
+    );
+
+    if (hasVitals) {
+      const { error: vitalError } = await supabase.from("vitals").insert({
+        visit_id: visit.id,
+        bp: bp.trim() || null,
+        pulse: pulse.trim() ? Number(pulse) : null,
+        spo2: spo2.trim() ? Number(spo2) : null,
+        weight: weight.trim() ? Number(weight) : null,
+      });
+
+      if (vitalError) {
+        throw new Error(
+          `Visit #${nextQueue} created, but vitals could not be saved: ${vitalError.message}`
+        );
+      }
+    }
+
+    return nextQueue;
+  }
 
   async function addPatient(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -247,87 +438,42 @@ export default function ReceptionPage() {
     setSaving(true);
 
     try {
-      const { data: patient, error: patientError } = await supabase
-        .from("patients")
-        .insert({
-          name: name.trim(),
-          age: age.trim() ? Number(age) : null,
-          gender: gender || null,
-          phone: phone.trim() || null,
-        })
-        .select("id")
-        .single();
+      let patientId: string;
+      let patientCode = "";
 
-      if (patientError) {
-        throw new Error("Patient: " + patientError.message);
+      if (selectedPatient) {
+        patientId = selectedPatient.id;
+        patientCode = selectedPatient.patient_code;
+      } else {
+        const { data: patient, error: patientError } = await supabase
+          .from("patients")
+          .insert({
+            name: name.trim(),
+            age: age.trim() ? Number(age) : null,
+            gender: gender || null,
+            phone: phone.trim() || null,
+          })
+          .select("id, patient_code")
+          .single();
+
+        if (patientError) throw new Error("Patient: " + patientError.message);
+
+        patientId = patient.id;
+        patientCode = patient.patient_code;
       }
 
-      const visitDate = getLocalDate();
+      const nextQueue = await createVisit(patientId);
 
-      const { data: latest, error: latestError } = await supabase
-        .from("visits")
-        .select("queue_no")
-        .eq("visit_date", visitDate)
-        .order("queue_no", { ascending: false })
-        .limit(1);
-
-      if (latestError) {
-        throw new Error("Queue number: " + latestError.message);
-      }
-
-      const nextQueue = (latest?.[0]?.queue_no ?? 0) + 1;
-
-      const { data: visit, error: visitError } = await supabase
-        .from("visits")
-        .insert({
-          patient_id: patient.id,
-          visit_date: visitDate,
-          queue_no: nextQueue,
-          status: "waiting",
-        })
-        .select("id")
-        .single();
-
-      if (visitError) {
-        throw new Error("Visit: " + visitError.message);
-      }
-
-      const hasVitals = Boolean(
-        bp.trim() || pulse.trim() || spo2.trim() || weight.trim()
+      setMessage(
+        `Visit created successfully! Patient ID: ${patientCode}. Queue number: ${nextQueue}.`
       );
 
-      if (hasVitals) {
-        const { error: vitalError } = await supabase
-          .from("vitals")
-          .insert({
-            visit_id: visit.id,
-            bp: bp.trim() || null,
-            pulse: pulse.trim() ? Number(pulse) : null,
-            spo2: spo2.trim() ? Number(spo2) : null,
-            weight: weight.trim() ? Number(weight) : null,
-          });
-
-        if (vitalError) {
-          throw new Error(
-            "Patient added, but vitals could not be saved: " +
-              vitalError.message
-          );
-        }
-      }
-
-      setMessage(`Patient added successfully. Queue number: ${nextQueue}`);
-      setName("");
-      setAge("");
-      setGender("Male");
-      setPhone("");
-      setBp("");
-      setPulse("");
-      setSpo2("");
-      setWeight("");
-
+      clearSelectedPatient();
+      setSearchTerm("");
+      setSearchResults([]);
       await loadData();
-    } catch (err: unknown) {
-      console.error("Add patient error:", err);
+    } catch (err) {
+      console.error("Add patient/visit error:", err);
       setError(readableError(err));
     } finally {
       setSaving(false);
@@ -341,77 +487,185 @@ export default function ReceptionPage() {
     const prescriptionsHtml = visit.prescriptions.length
       ? visit.prescriptions
           .map((p) => {
-            const diagnosis = safeText(p.diagnosis);
             const medicines = safeText(p.medicines);
-            const advice = safeText(p.advice);
-
-            const otherFields = Object.entries(p)
-              .filter(
-                ([key, value]) =>
-                  ![
-                    "id",
-                    "visit_id",
-                    "diagnosis",
-                    "medicines",
-                    "advice",
-                    "created_at",
-                  ].includes(key) &&
-                  value !== null &&
-                  value !== ""
-              )
-              .map(
-                ([key, value]) =>
-                  `<p><b>${escapeHtml(
-                    key.replace(/_/g, " ")
-                  )}:</b> ${escapeHtml(safeText(value))}</p>`
-              )
-              .join("");
+            const investigations = safeText(p.investigations);
+            const advice = safeText(p.advice ?? p.notes);
 
             return `
-              <h3>Diagnosis</h3>
-              <p>${escapeHtml(diagnosis)}</p>
-              <h3>Medicines / Dosage / Duration / Instructions</h3>
-              <pre>${escapeHtml(medicines)}</pre>
-              <h3>Advice</h3>
-              <pre>${escapeHtml(advice)}</pre>
-              ${otherFields}
+              <section class="prescription-section">
+                <h2>Clinical Assessment & Prescription</h2>
+
+                <h3>Diagnosis</h3>
+                <div class="content">${escapeHtml(safeText(p.diagnosis))}</div>
+
+                <h3>Medicines / Dosage / Duration / Instructions</h3>
+                <div class="content">${escapeHtml(medicines)}</div>
+
+                <h3>Investigations</h3>
+                <div class="content">${escapeHtml(investigations)}</div>
+
+                <h3>Advice / Follow-up</h3>
+                <div class="content">${escapeHtml(advice)}</div>
+
+                <div class="doctor-block">
+                  <h3>Prescribing Doctor</h3>
+                  <p><b>Name:</b> ${escapeHtml(safeText(p.doctor_name))}</p>
+                  <p><b>Qualification:</b> ${escapeHtml(
+                    safeText(p.doctor_qualification)
+                  )}</p>
+                  <p><b>Registration No.:</b> ${escapeHtml(
+                    safeText(p.doctor_reg_no)
+                  )}</p>
+                </div>
+              </section>
             `;
           })
-          .join("<hr />")
+          .join('<hr class="separator" />')
       : "<p>No prescription has been saved for this visit yet.</p>";
 
     const html = `
+      <!DOCTYPE html>
       <html>
       <head>
-        <title>Patient Prescription</title>
+        <meta charset="UTF-8" />
+        <title>Clinic Prescription</title>
         <style>
-          body { font-family: Arial, sans-serif; padding: 30px; color: #111; }
-          h1 { margin-bottom: 4px; }
-          h3 { margin-bottom: 6px; }
-          p { margin-top: 4px; }
-          pre { white-space: pre-wrap; font-family: Arial, sans-serif; }
-          hr { margin: 20px 0; }
+          * { box-sizing: border-box; }
+          body {
+            font-family: Arial, Helvetica, sans-serif;
+            color: #111827;
+            margin: 0 auto;
+            padding: 28px;
+            max-width: 850px;
+            font-size: 13px;
+            line-height: 1.5;
+          }
+          .clinic-header {
+            text-align: center;
+            border-bottom: 2px solid #111827;
+            padding-bottom: 12px;
+            margin-bottom: 16px;
+          }
+          .clinic-header h1 {
+            margin: 0 0 4px;
+            font-size: 25px;
+          }
+          .clinic-header p { margin: 2px 0; }
+          h2 {
+            font-size: 17px;
+            margin: 18px 0 8px;
+            border-bottom: 1px solid #9ca3af;
+            padding-bottom: 5px;
+          }
+          h3 {
+            font-size: 13px;
+            margin: 12px 0 4px;
+          }
+          p { margin: 4px 0; }
+          .meta, .patient-grid, .vitals-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 7px 18px;
+          }
+          .panel {
+            border: 1px solid #d1d5db;
+            padding: 10px 12px;
+            border-radius: 5px;
+            margin: 10px 0;
+          }
+          .content {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            padding: 4px 0 8px;
+          }
+          .doctor-block {
+            margin-top: 20px;
+            padding-top: 10px;
+            border-top: 1px solid #9ca3af;
+          }
+          .separator {
+            border: 0;
+            border-top: 1px dashed #9ca3af;
+            margin: 22px 0;
+          }
+          .footer {
+            margin-top: 28px;
+            display: flex;
+            justify-content: space-between;
+            gap: 30px;
+          }
+          .signature {
+            width: 210px;
+            border-top: 1px solid #111;
+            padding-top: 6px;
+            text-align: center;
+            margin-top: 35px;
+          }
+          @media print {
+            body { padding: 8mm; max-width: none; }
+            .panel { break-inside: avoid; }
+            .prescription-section { break-inside: avoid; }
+          }
         </style>
       </head>
       <body>
-        <h1>Clinic Prescription</h1>
-        <p>Queue Number: ${visit.queue_no}</p>
-        <hr />
-        <h3>Patient Details</h3>
-        <p><b>Name:</b> ${escapeHtml(patient?.name ?? "—")}</p>
-        <p><b>Age:</b> ${escapeHtml(String(patient?.age ?? "—"))}</p>
-        <p><b>Gender:</b> ${escapeHtml(patient?.gender ?? "—")}</p>
-        <p><b>Phone:</b> ${escapeHtml(patient?.phone ?? "—")}</p>
-        <hr />
-        <h3>Vitals</h3>
-        <p><b>BP:</b> ${escapeHtml(vital?.bp ?? "—")}</p>
-        <p><b>Pulse / Heart Rate:</b> ${escapeHtml(String(vital?.pulse ?? "—"))} bpm</p>
-        <p><b>SpO2:</b> ${escapeHtml(String(vital?.spo2 ?? "—"))}%</p>
-        <p><b>Weight:</b> ${escapeHtml(String(vital?.weight ?? "—"))} kg</p>
-        <hr />
-        <h2>Doctor's Prescription</h2>
+        <header class="clinic-header">
+          <h1>DRISHYAM CLINIC</h1>
+          <p>Patient Consultation & Prescription</p>
+        </header>
+
+        <div class="meta">
+          <p><b>Patient ID:</b> ${escapeHtml(
+            patient?.patient_code ?? "—"
+          )}</p>
+          <p><b>Visit Date:</b> ${escapeHtml(visit.visit_date)}</p>
+          <p><b>Visit ID:</b> ${escapeHtml(visit.id)}</p>
+          <p><b>Queue Number:</b> ${escapeHtml(String(visit.queue_no))}</p>
+        </div>
+
+        <div class="panel">
+          <h2>Patient Details</h2>
+          <div class="patient-grid">
+            <p><b>Name:</b> ${escapeHtml(patient?.name ?? "—")}</p>
+            <p><b>Age:</b> ${escapeHtml(String(patient?.age ?? "—"))}</p>
+            <p><b>Gender:</b> ${escapeHtml(patient?.gender ?? "—")}</p>
+            <p><b>Phone:</b> ${escapeHtml(patient?.phone ?? "—")}</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Vitals</h2>
+          <div class="vitals-grid">
+            <p><b>Blood Pressure:</b> ${escapeHtml(vital?.bp ?? "—")}</p>
+            <p><b>Pulse:</b> ${escapeHtml(
+              String(vital?.pulse ?? "—")
+            )} bpm</p>
+            <p><b>SpO₂:</b> ${escapeHtml(
+              String(vital?.spo2 ?? "—")
+            )}${vital?.spo2 != null ? "%" : ""}</p>
+            <p><b>Weight:</b> ${escapeHtml(
+              String(vital?.weight ?? "—")
+            )}${vital?.weight != null ? " kg" : ""}</p>
+            <p><b>Temperature:</b> ${escapeHtml(
+              String(vital?.temperature ?? "—")
+            )}${vital?.temperature != null ? " °C" : ""}</p>
+          </div>
+        </div>
+
         ${prescriptionsHtml}
-        <script>window.onload = () => window.print();<\/script>
+
+        <div class="footer">
+          <p><b>Prescription date:</b> ${escapeHtml(visit.visit_date)}</p>
+          <div class="signature">
+            Doctor's Signature
+          </div>
+        </div>
+
+        <script>
+          window.onload = function () {
+            window.print();
+          };
+        <\/script>
       </body>
       </html>
     `;
@@ -449,19 +703,112 @@ export default function ReceptionPage() {
 
         {error && (
           <div className="whitespace-pre-wrap break-words rounded-lg border border-red-300 bg-red-50 p-4 text-red-800">
-            <b>Database error:</b> {error}
+            <b>Error:</b> {error}
           </div>
         )}
 
         {message && (
-          <div className="rounded-lg border border-green-300 bg-green-50 p-4 text-green-800">
+          <div className="whitespace-pre-wrap rounded-lg border border-green-300 bg-green-50 p-4 text-green-800">
             {message}
           </div>
         )}
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
+          <h2 className="mb-3 text-xl font-semibold">
+            Search Existing Patient
+          </h2>
+          <p className="mb-3 text-sm text-slate-600">
+            Patient ID, mobile number, ya patient name se search karo.
+            Multiple matching patients hon toh correct record select karo.
+          </p>
+
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void searchPatients();
+                }
+              }}
+              className="min-w-0 flex-1 rounded-lg border p-3"
+              placeholder="e.g. DRI-000001 or mobile number"
+            />
+            <button
+              type="button"
+              disabled={searching}
+              onClick={() => void searchPatients()}
+              className="rounded-lg bg-indigo-700 px-5 py-3 font-semibold text-white disabled:opacity-50"
+            >
+              {searching ? "Searching..." : "Search Patient"}
+            </button>
+          </div>
+
+          {searchResults.length > 0 && (
+            <div className="mt-4 space-y-2">
+              <h3 className="font-semibold">
+                Search Results ({searchResults.length})
+              </h3>
+
+              {searchResults.map((patient) => (
+                <div
+                  key={patient.id}
+                  className="flex flex-col justify-between gap-3 rounded-lg border p-3 sm:flex-row sm:items-center"
+                >
+                  <div>
+                    <p className="font-semibold">{patient.name}</p>
+                    <p className="text-sm text-slate-600">
+                      ID: {patient.patient_code} | Phone: {patient.phone || "—"}
+                    </p>
+                    <p className="text-sm text-slate-600">
+                      Age: {patient.age ?? "—"} | Gender:{" "}
+                      {patient.gender || "—"}
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => selectExistingPatient(patient)}
+                      className="rounded-lg bg-blue-700 px-3 py-2 text-white"
+                    >
+                      Select for Visit
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void loadPatientHistory(patient)}
+                      className="rounded-lg bg-slate-700 px-3 py-2 text-white"
+                    >
+                      View History
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {selectedPatient && (
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-300 bg-blue-50 p-3">
+              <p>
+                Selected: <b>{selectedPatient.name}</b> —{" "}
+                <b>{selectedPatient.patient_code}</b>
+              </p>
+              <button
+                type="button"
+                onClick={clearSelectedPatient}
+                className="rounded-lg border border-blue-700 px-3 py-2 text-blue-800"
+              >
+                Clear Selection
+              </button>
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-xl bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold">
-            Add Patient &amp; Vitals
+            {selectedPatient ? "Create Repeat Visit" : "Register New Patient"}{" "}
+            & Vitals
           </h2>
 
           <form
@@ -476,7 +823,8 @@ export default function ReceptionPage() {
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-lg border p-3"
+                disabled={Boolean(selectedPatient)}
+                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
                 placeholder="Patient name"
               />
             </label>
@@ -488,7 +836,8 @@ export default function ReceptionPage() {
                 min="0"
                 value={age}
                 onChange={(e) => setAge(e.target.value)}
-                className="w-full rounded-lg border p-3"
+                disabled={Boolean(selectedPatient)}
+                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
                 placeholder="Age"
               />
             </label>
@@ -498,7 +847,8 @@ export default function ReceptionPage() {
               <select
                 value={gender}
                 onChange={(e) => setGender(e.target.value)}
-                className="w-full rounded-lg border p-3"
+                disabled={Boolean(selectedPatient)}
+                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
               >
                 <option>Male</option>
                 <option>Female</option>
@@ -511,7 +861,8 @@ export default function ReceptionPage() {
               <input
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                className="w-full rounded-lg border p-3"
+                disabled={Boolean(selectedPatient)}
+                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
                 placeholder="Phone number"
               />
             </label>
@@ -576,11 +927,129 @@ export default function ReceptionPage() {
                 disabled={saving || !today}
                 className="rounded-lg bg-blue-700 px-5 py-3 font-semibold text-white disabled:opacity-50"
               >
-                {saving ? "Saving..." : "Add Patient to Queue"}
+                {saving
+                  ? "Saving..."
+                  : selectedPatient
+                    ? "Create Repeat Visit"
+                    : "Register Patient & Add to Queue"}
               </button>
             </div>
           </form>
+
+          <p className="mt-3 text-xs text-slate-500">
+            Repeat visit ke liye pehle patient search karke Select for Visit
+            dabao. Bina selection ke form submit karne par naya patient record
+            banega.
+          </p>
         </section>
+
+        {historyPatient && (
+          <section className="rounded-xl bg-white p-5 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-bold">Patient History</h2>
+                <p className="text-sm text-slate-600">
+                  {historyPatient.name} — {historyPatient.patient_code}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setHistoryPatient(null);
+                  setHistoryVisits([]);
+                }}
+                className="rounded-lg border px-3 py-2"
+              >
+                Close History
+              </button>
+            </div>
+
+            {historyLoading ? (
+              <p className="mt-4">Loading patient history...</p>
+            ) : historyVisits.length === 0 ? (
+              <p className="mt-4 rounded-lg bg-slate-50 p-4">
+                No previous visits found for this patient.
+              </p>
+            ) : (
+              <div className="mt-4 space-y-4">
+                {historyVisits.map((visit) => (
+                  <article key={visit.id} className="rounded-lg border p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <h3 className="font-bold">
+                          {visit.visit_date} — Queue #{visit.queue_no}
+                        </h3>
+                        <p className="break-all text-xs text-slate-500">
+                          Visit ID: {visit.id}
+                        </p>
+                        <p className="text-sm">Status: {visit.status}</p>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => printVisit(visit)}
+                        className="rounded-lg bg-green-700 px-3 py-2 text-white"
+                      >
+                        View / Print
+                      </button>
+                    </div>
+
+                    <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                      <p>BP: {visit.vitals?.bp ?? "—"}</p>
+                      <p>Pulse: {visit.vitals?.pulse ?? "—"}</p>
+                      <p>SpO₂: {visit.vitals?.spo2 ?? "—"}</p>
+                      <p>Weight: {visit.vitals?.weight ?? "—"} kg</p>
+                      <p>
+                        Temperature: {visit.vitals?.temperature ?? "—"}
+                        {visit.vitals?.temperature != null ? " °C" : ""}
+                      </p>
+                    </div>
+
+                    {visit.prescriptions.length === 0 ? (
+                      <p className="mt-3 text-sm text-slate-500">
+                        No prescription saved for this visit.
+                      </p>
+                    ) : (
+                      visit.prescriptions.map((p, index) => (
+                        <div
+                          key={p.id ?? `${visit.id}-${index}`}
+                          className="mt-3 space-y-2 border-t pt-3 text-sm"
+                        >
+                          <p>
+                            <b>Diagnosis:</b> {safeText(p.diagnosis)}
+                          </p>
+                          <p><b>Medicines:</b></p>
+                          <pre className="whitespace-pre-wrap font-sans">
+                            {safeText(p.medicines)}
+                          </pre>
+                          <p><b>Investigations:</b></p>
+                          <pre className="whitespace-pre-wrap font-sans">
+                            {safeText(p.investigations)}
+                          </pre>
+                          <p>
+                            <b>Advice:</b> {safeText(p.advice ?? p.notes)}
+                          </p>
+                          <p>
+                            <b>Doctor:</b> {safeText(p.doctor_name)}
+                          </p>
+                          <p>
+                            <b>Qualification:</b>{" "}
+                            {safeText(p.doctor_qualification)}
+                          </p>
+                          <p>
+                            <b>Registration No.:</b>{" "}
+                            {safeText(p.doctor_reg_no)}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold">
@@ -595,11 +1064,13 @@ export default function ReceptionPage() {
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1200px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[1400px] border-collapse text-left text-sm">
                 <thead>
                   <tr className="border-b bg-slate-50">
                     <th className="p-3">Queue</th>
+                    <th className="p-3">Patient ID</th>
                     <th className="p-3">Patient</th>
+                    <th className="p-3">Visit ID</th>
                     <th className="p-3">Age/Gender</th>
                     <th className="p-3">Phone</th>
                     <th className="p-3">BP</th>
@@ -607,21 +1078,30 @@ export default function ReceptionPage() {
                     <th className="p-3">SpO₂</th>
                     <th className="p-3">Weight</th>
                     <th className="p-3">Status</th>
-                    <th className="p-3">Prescription</th>
+                    <th className="p-3">Actions</th>
                   </tr>
                 </thead>
+
                 <tbody>
                   {queue.map((visit) => (
                     <tr key={visit.id} className="border-b last:border-0">
                       <td className="p-3 font-semibold">#{visit.queue_no}</td>
                       <td className="p-3">
+                        {visit.patients?.patient_code ?? "—"}
+                      </td>
+                      <td className="p-3">
                         {visit.patients?.name ?? "Unknown"}
+                      </td>
+                      <td className="max-w-36 break-all p-3 text-xs">
+                        {visit.id}
                       </td>
                       <td className="p-3">
                         {visit.patients?.age ?? "—"} /{" "}
                         {visit.patients?.gender ?? "—"}
                       </td>
-                      <td className="p-3">{visit.patients?.phone ?? "—"}</td>
+                      <td className="p-3">
+                        {visit.patients?.phone ?? "—"}
+                      </td>
                       <td className="p-3">{visit.vitals?.bp ?? "—"}</td>
                       <td className="p-3">{visit.vitals?.pulse ?? "—"}</td>
                       <td className="p-3">
@@ -636,13 +1116,28 @@ export default function ReceptionPage() {
                       </td>
                       <td className="p-3">{visit.status}</td>
                       <td className="p-3">
-                        <button
-                          type="button"
-                          onClick={() => printVisit(visit)}
-                          className="rounded-lg bg-green-700 px-3 py-2 text-white"
-                        >
-                          View / Print
-                        </button>
+                        <div className="flex flex-col gap-2">
+                          <button
+                            type="button"
+                            onClick={() => printVisit(visit)}
+                            className="rounded-lg bg-green-700 px-3 py-2 text-white"
+                          >
+                            View / Print
+                          </button>
+
+                          {visit.patients && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void loadPatientHistory(visit.patients!)
+                              }
+                              className="rounded-lg bg-slate-700 px-3 py-2 text-white"
+                            >
+                              History
+                            </button>
+                          )}
+                        </div>
+
                         <p className="mt-1 text-xs text-slate-500">
                           {visit.prescriptions.length
                             ? `${visit.prescriptions.length} saved`
@@ -658,9 +1153,7 @@ export default function ReceptionPage() {
         </section>
 
         <section className="space-y-4">
-          <h2 className="text-xl font-bold">
-            Doctor&apos;s Prescriptions
-          </h2>
+          <h2 className="text-xl font-bold">Doctor&apos;s Prescriptions</h2>
 
           {queue.filter((v) => v.prescriptions.length > 0).length === 0 ? (
             <div className="rounded-xl bg-white p-5 text-slate-600 shadow-sm">
@@ -681,9 +1174,11 @@ export default function ReceptionPage() {
                         {visit.patients?.name ?? "Unknown"}
                       </h3>
                       <p className="text-sm text-slate-500">
+                        Patient ID: {visit.patients?.patient_code ?? "—"} |
                         Status: {visit.status}
                       </p>
                     </div>
+
                     <button
                       type="button"
                       onClick={() => printVisit(visit)}
@@ -704,6 +1199,7 @@ export default function ReceptionPage() {
                           {safeText(p.diagnosis)}
                         </p>
                       </div>
+
                       <div>
                         <h4 className="font-semibold">
                           Medicines / Dosage / Duration / Instructions
@@ -712,11 +1208,26 @@ export default function ReceptionPage() {
                           {safeText(p.medicines)}
                         </pre>
                       </div>
+
+                      <div>
+                        <h4 className="font-semibold">Investigations</h4>
+                        <pre className="whitespace-pre-wrap font-sans">
+                          {safeText(p.investigations)}
+                        </pre>
+                      </div>
+
                       <div>
                         <h4 className="font-semibold">Advice / Notes</h4>
                         <p className="whitespace-pre-wrap">
-                          {safeText(p.advice)}
+                          {safeText(p.advice ?? p.notes)}
                         </p>
+                      </div>
+
+                      <div>
+                        <h4 className="font-semibold">Doctor Details</h4>
+                        <p>Name: {safeText(p.doctor_name)}</p>
+                        <p>Qualification: {safeText(p.doctor_qualification)}</p>
+                        <p>Registration No.: {safeText(p.doctor_reg_no)}</p>
                       </div>
                     </div>
                   ))}
