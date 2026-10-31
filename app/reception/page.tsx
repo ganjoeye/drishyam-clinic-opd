@@ -6,61 +6,74 @@ import { supabase } from "../../lib/supabase";
 
 type Patient = {
   id: string;
-  patient_code: string;
   name: string;
   age: number | null;
   gender: string | null;
   phone: string | null;
+  patient_code: string | null;
 };
 
 type Vital = {
-  id: string;
-  visit_id: string;
+  id?: string;
+  visit_id?: string;
   bp: string | null;
-  weight: number | null;
   pulse: number | null;
   spo2: number | null;
-  temperature?: number | null;
-  blood_sugar?: number | null;
+  weight: number | null;
+  temperature: number | null;
+  blood_sugar: number | null;
 };
 
 type Prescription = {
-  id?: string;
-  visit_id?: string;
-  diagnosis?: string | null;
-  medicines?: unknown;
-  investigations?: string | null;
-  advice?: string | null;
-  notes?: string | null;
-  doctor_name?: string | null;
-  doctor_qualification?: string | null;
-  doctor_reg_no?: string | null;
-  created_at?: string;
+  id: string;
+  diagnosis: string | null;
+  medicines: unknown;
+  investigations: string | null;
+  advice: string | null;
+  notes: string | null;
+  doctor_name: string | null;
+  doctor_qualification: string | null;
+  doctor_reg_no: string | null;
 };
 
 type Visit = {
   id: string;
+  patient_id: string;
   queue_no: number;
-  visit_date: string;
   status: string;
+  visit_date: string;
+  video_link: string | null;
   patients: Patient | null;
   vitals: Vital | null;
   prescriptions: Prescription[];
 };
 
-function getLocalDate() {
+const today = () => {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(
     2,
     "0"
   )}-${String(d.getDate()).padStart(2, "0")}`;
-}
+};
 
-function readableError(err: unknown) {
-  if (typeof err === "object" && err !== null && "message" in err) {
-    return String(err.message);
+const emptyVitals = {
+  bp: "",
+  pulse: "",
+  spo2: "",
+  weight: "",
+  temperature: "",
+  blood_sugar: "",
+};
+
+function showError(error: unknown) {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error
+  ) {
+    return String(error.message);
   }
-  return String(err);
+  return "Something went wrong. Please try again.";
 }
 
 function safeText(value: unknown): string {
@@ -69,235 +82,328 @@ function safeText(value: unknown): string {
   return String(value);
 }
 
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
 export default function ReceptionPage() {
-  const [today, setToday] = useState("");
-
-  const [name, setName] = useState("");
-  const [age, setAge] = useState("");
-  const [gender, setGender] = useState("Male");
-  const [phone, setPhone] = useState("");
-
-  const [bp, setBp] = useState("");
-  const [pulse, setPulse] = useState("");
-  const [spo2, setSpo2] = useState("");
-  const [weight, setWeight] = useState("");
-  const [bloodSugar, setBloodSugar] = useState("");
-
   const [queue, setQueue] = useState<Visit[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
   const [message, setMessage] = useState("");
-  const [sendingVisitId, setSendingVisitId] = useState<string | null>(null);
+  const [error, setError] = useState("");
 
-  const [searchTerm, setSearchTerm] = useState("");
+  const [patientName, setPatientName] = useState("");
+  const [age, setAge] = useState("");
+  const [gender, setGender] = useState("Male");
+  const [phone, setPhone] = useState("");
+  const [vitals, setVitals] = useState(emptyVitals);
+
+  const [searchText, setSearchText] = useState("");
   const [searchResults, setSearchResults] = useState<Patient[]>([]);
+  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(
+    null
+  );
   const [searching, setSearching] = useState(false);
-  const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
 
   const [historyPatient, setHistoryPatient] = useState<Patient | null>(null);
   const [historyVisits, setHistoryVisits] = useState<Visit[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
 
-  const loadData = useCallback(async () => {
-    if (!today) return;
+  const [sendingVisitId, setSendingVisitId] = useState<string | null>(null);
 
-    try {
-      const { data: visitData, error: visitError } = await supabase
-        .from("visits")
-        .select(
-          "id, queue_no, visit_date, status, patients(id, patient_code, name, age, gender, phone)"
+  const loadQueue = useCallback(async () => {
+    setLoading(true);
+    setError("");
+
+    const { data, error: fetchError } = await supabase
+      .from("visits")
+      .select(`
+        id,
+        patient_id,
+        queue_no,
+        status,
+        visit_date,
+        video_link,
+        patients (
+          id,
+          name,
+          age,
+          gender,
+          phone,
+          patient_code
+        ),
+        vitals (
+          id,
+          visit_id,
+          bp,
+          pulse,
+          spo2,
+          weight,
+          temperature,
+          blood_sugar
+        ),
+        prescriptions (
+          id,
+          diagnosis,
+          medicines,
+          investigations,
+          advice,
+          notes,
+          doctor_name,
+          doctor_qualification,
+          doctor_reg_no
         )
-        .eq("visit_date", today)
-        .order("queue_no", { ascending: true });
+      `)
+      .eq("visit_date", today())
+      .order("queue_no", { ascending: true });
 
-      if (visitError) throw new Error("Visits: " + visitError.message);
+    if (fetchError) {
+      setError(showError(fetchError));
+      setQueue([]);
+    } else {
+      const rows = (data ?? []).map((row: any) => ({
+        ...row,
+        patients: Array.isArray(row.patients)
+          ? row.patients[0] ?? null
+          : row.patients,
+        vitals: Array.isArray(row.vitals)
+          ? row.vitals[0] ?? null
+          : row.vitals,
+        prescriptions: Array.isArray(row.prescriptions)
+          ? row.prescriptions
+          : row.prescriptions
+            ? [row.prescriptions]
+            : [],
+      })) as Visit[];
 
-      const visits = (visitData ?? []) as unknown as Omit<
-        Visit,
-        "vitals" | "prescriptions"
-      >[];
-
-      const ids = visits.map((v) => v.id);
-      let vitalRows: Vital[] = [];
-      let prescriptionRows: Prescription[] = [];
-
-      if (ids.length > 0) {
-        const { data: vitalData, error: vitalError } = await supabase
-          .from("vitals")
-          .select(
-            "id, visit_id, bp, weight, pulse, spo2, temperature, blood_sugar"
-          )
-          .in("visit_id", ids);
-
-        if (vitalError) throw new Error("Vitals: " + vitalError.message);
-        vitalRows = (vitalData ?? []) as Vital[];
-
-        const { data: prescriptionData, error: prescriptionError } =
-          await supabase
-            .from("prescriptions")
-            .select("*")
-            .in("visit_id", ids);
-
-        if (prescriptionError) {
-          throw new Error("Prescriptions: " + prescriptionError.message);
-        }
-
-        prescriptionRows = (prescriptionData ?? []) as Prescription[];
-      }
-
-      setQueue(
-        visits.map((visit) => ({
-          ...visit,
-          vitals: vitalRows.find((v) => v.visit_id === visit.id) ?? null,
-          prescriptions: prescriptionRows.filter(
-            (p) => p.visit_id === visit.id
-          ),
-        }))
-      );
-
-      setError("");
-    } catch (err) {
-      console.error("Reception load error:", err);
-      setError(readableError(err));
-    } finally {
-      setLoading(false);
+      setQueue(rows);
     }
-  }, [today]);
 
-  useEffect(() => {
-    setToday(getLocalDate());
+    setLoading(false);
   }, []);
 
   useEffect(() => {
-    if (!today) return;
-
-    void loadData();
-
-    const interval = window.setInterval(() => void loadData(), 15000);
+    void loadQueue();
 
     const channel = supabase
-      .channel("reception-live")
+      .channel("reception-live-queue")
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "visits" },
-        () => void loadData()
+        () => void loadQueue()
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "vitals" },
-        () => void loadData()
+        () => void loadQueue()
       )
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "prescriptions" },
-        () => void loadData()
+        () => void loadQueue()
       )
       .subscribe();
 
     return () => {
-      window.clearInterval(interval);
       void supabase.removeChannel(channel);
     };
-  }, [today, loadData]);
+  }, [loadQueue]);
 
-  function resetVitals() {
-    setBp("");
-    setPulse("");
-    setSpo2("");
-    setWeight("");
-    setBloodSugar("");
+  function updateVital(
+    field: keyof typeof emptyVitals,
+    value: string
+  ) {
+    setVitals((previous) => ({ ...previous, [field]: value }));
   }
 
-  function clearSelectedPatient() {
-    setSelectedPatient(null);
-    setName("");
+  function resetForm() {
+    setPatientName("");
     setAge("");
     setGender("Male");
     setPhone("");
-    resetVitals();
+    setVitals(emptyVitals);
+    setSelectedPatient(null);
+    setSearchText("");
+    setSearchResults([]);
   }
 
   async function searchPatients() {
-    const term = searchTerm.trim();
+    const term = searchText.trim();
 
-    setError("");
-    setMessage("");
-    setSelectedPatient(null);
-
-    if (!term) {
-      setError("Patient ID, mobile number, ya name enter karo.");
+    if (term.length < 2) {
+      setSearchResults([]);
       return;
     }
 
     setSearching(true);
+    setError("");
+
+    const { data, error: searchError } = await supabase
+      .from("patients")
+      .select("id,name,age,gender,phone,patient_code")
+      .or(
+        `name.ilike.%${term}%,phone.ilike.%${term}%,patient_code.ilike.%${term}%`
+      )
+      .limit(10);
+
+    if (searchError) {
+      setError(showError(searchError));
+      setSearchResults([]);
+    } else {
+      setSearchResults((data ?? []) as Patient[]);
+    }
+
+    setSearching(false);
+  }
+
+  function choosePatient(patient: Patient) {
+    setSelectedPatient(patient);
+    setPatientName(patient.name);
+    setAge(patient.age?.toString() ?? "");
+    setGender(patient.gender ?? "Male");
+    setPhone(patient.phone ?? "");
+    setSearchResults([]);
+    setMessage(`Selected patient: ${patient.name}`);
+  }
+
+  function numericOrNull(value: string) {
+    return value.trim() === "" ? null : Number(value);
+  }
+
+  async function registerPatient(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+
+    if (!patientName.trim()) {
+      setError("Please enter patient name.");
+      return;
+    }
+
+    if (age.trim() && (!Number.isFinite(Number(age)) || Number(age) < 0)) {
+      setError("Please enter a valid age.");
+      return;
+    }
+
+    const numericFields = [
+      ["Pulse", vitals.pulse],
+      ["SpO₂", vitals.spo2],
+      ["Weight", vitals.weight],
+      ["Temperature", vitals.temperature],
+      ["Blood Sugar", vitals.blood_sugar],
+    ] as const;
+
+    for (const [label, value] of numericFields) {
+      if (value.trim() !== "" && !Number.isFinite(Number(value))) {
+        setError(`${label} must be a valid number.`);
+        return;
+      }
+    }
+
+    if (
+      vitals.temperature.trim() &&
+      (Number(vitals.temperature) < 25 ||
+        Number(vitals.temperature) > 45)
+    ) {
+      setError("Please enter a valid temperature between 25°C and 45°C.");
+      return;
+    }
+
+    setSaving(true);
 
     try {
-      const [codeResult, phoneResult, nameResult] = await Promise.all([
-        supabase
+      let patientId = selectedPatient?.id;
+
+      if (!patientId) {
+        const { data: newPatient, error: patientError } = await supabase
           .from("patients")
-          .select("id, patient_code, name, age, gender, phone")
-          .ilike("patient_code", `%${term}%`)
-          .limit(20),
-        supabase
-          .from("patients")
-          .select("id, patient_code, name, age, gender, phone")
-          .ilike("phone", `%${term}%`)
-          .limit(20),
-        supabase
-          .from("patients")
-          .select("id, patient_code, name, age, gender, phone")
-          .ilike("name", `%${term}%`)
-          .limit(20),
-      ]);
+          .insert({
+            name: patientName.trim(),
+            age: numericOrNull(age),
+            gender,
+            phone: phone.trim() || null,
+          })
+          .select("id")
+          .single();
 
-      const queryError =
-        codeResult.error || phoneResult.error || nameResult.error;
+        if (patientError) throw patientError;
+        patientId = newPatient.id;
+      }
 
-      if (queryError) throw new Error(queryError.message);
+      const { data: previousVisits, error: queueError } = await supabase
+        .from("visits")
+        .select("queue_no")
+        .eq("visit_date", today())
+        .order("queue_no", { ascending: false })
+        .limit(1);
 
-      const combined = [
-        ...(codeResult.data ?? []),
-        ...(phoneResult.data ?? []),
-        ...(nameResult.data ?? []),
-      ] as Patient[];
+      if (queueError) throw queueError;
 
-      const unique = Array.from(
-        new Map(combined.map((p) => [p.id, p])).values()
+      const nextQueue =
+        (previousVisits?.[0]?.queue_no ?? 0) + 1;
+
+      const { data: newVisit, error: visitError } = await supabase
+        .from("visits")
+        .insert({
+          patient_id: patientId,
+          queue_no: nextQueue,
+          status: "waiting",
+          visit_date: today(),
+        })
+        .select("id")
+        .single();
+
+      if (visitError) throw visitError;
+
+      const hasVitals = Object.values(vitals).some(
+        (value) => value.trim() !== ""
       );
 
-      setSearchResults(unique);
+      if (hasVitals) {
+        const { error: vitalsError } = await supabase
+          .from("vitals")
+          .insert({
+            visit_id: newVisit.id,
+            bp: vitals.bp.trim() || null,
+            pulse: numericOrNull(vitals.pulse),
+            spo2: numericOrNull(vitals.spo2),
+            weight: numericOrNull(vitals.weight),
+            temperature: numericOrNull(vitals.temperature),
+            blood_sugar: numericOrNull(vitals.blood_sugar),
+          });
 
-      if (unique.length === 0) {
-        setMessage(
-          "Existing patient nahi mila. Neeche form se new patient register kar sakte ho."
-        );
+        if (vitalsError) throw vitalsError;
       }
+
+      setMessage(
+        `Patient registered successfully. Queue token: ${nextQueue}`
+      );
+      resetForm();
+      await loadQueue();
     } catch (err) {
-      setError("Patient search failed: " + readableError(err));
+      setError(showError(err));
     } finally {
-      setSearching(false);
+      setSaving(false);
     }
   }
 
-  function selectExistingPatient(patient: Patient) {
-    setSelectedPatient(patient);
-    setName(patient.name);
-    setAge(patient.age === null ? "" : String(patient.age));
-    setGender(patient.gender || "Other");
-    setPhone(patient.phone || "");
-    setSearchResults([]);
-    setMessage(`Selected patient: ${patient.patient_code}`);
+  async function sendToPatientRoom(visit: Visit) {
+    setSendingVisitId(visit.id);
     setError("");
+    setMessage("");
+
+    const { error: updateError } = await supabase
+      .from("visits")
+      .update({ status: "in-consultation" })
+      .eq("id", visit.id);
+
+    if (updateError) {
+      setError(showError(updateError));
+    } else {
+      setMessage(
+        `Queue #${visit.queue_no} sent to Patient Room.`
+      );
+      await loadQueue();
+    }
+
+    setSendingVisitId(null);
   }
 
   async function loadPatientHistory(patient: Patient) {
@@ -306,684 +412,397 @@ export default function ReceptionPage() {
     setHistoryLoading(true);
     setError("");
 
-    try {
-      const { data: visitData, error: visitError } = await supabase
-        .from("visits")
-        .select(
-          "id, queue_no, visit_date, status, patients(id, patient_code, name, age, gender, phone)"
+    const { data, error: historyError } = await supabase
+      .from("visits")
+      .select(`
+        id,
+        patient_id,
+        queue_no,
+        status,
+        visit_date,
+        video_link,
+        patients (
+          id,
+          name,
+          age,
+          gender,
+          phone,
+          patient_code
+        ),
+        vitals (
+          id,
+          visit_id,
+          bp,
+          pulse,
+          spo2,
+          weight,
+          temperature,
+          blood_sugar
+        ),
+        prescriptions (
+          id,
+          diagnosis,
+          medicines,
+          investigations,
+          advice,
+          notes,
+          doctor_name,
+          doctor_qualification,
+          doctor_reg_no
         )
-        .eq("patient_id", patient.id)
-        .order("visit_date", { ascending: false });
+      `)
+      .eq("patient_id", patient.id)
+      .order("visit_date", { ascending: false });
 
-      if (visitError) throw new Error(visitError.message);
+    if (historyError) {
+      setError(showError(historyError));
+    } else {
+      const rows = (data ?? []).map((row: any) => ({
+        ...row,
+        patients: Array.isArray(row.patients)
+          ? row.patients[0] ?? null
+          : row.patients,
+        vitals: Array.isArray(row.vitals)
+          ? row.vitals[0] ?? null
+          : row.vitals,
+        prescriptions: Array.isArray(row.prescriptions)
+          ? row.prescriptions
+          : row.prescriptions
+            ? [row.prescriptions]
+            : [],
+      })) as Visit[];
 
-      const visits = (visitData ?? []) as unknown as Omit<
-        Visit,
-        "vitals" | "prescriptions"
-      >[];
-
-      const ids = visits.map((v) => v.id);
-      let vitalRows: Vital[] = [];
-      let prescriptionRows: Prescription[] = [];
-
-      if (ids.length > 0) {
-        const [vitalsResult, prescriptionsResult] = await Promise.all([
-          supabase
-            .from("vitals")
-            .select(
-              "id, visit_id, bp, weight, pulse, spo2, temperature, blood_sugar"
-            )
-            .in("visit_id", ids),
-          supabase.from("prescriptions").select("*").in("visit_id", ids),
-        ]);
-
-        if (vitalsResult.error) throw new Error(vitalsResult.error.message);
-        if (prescriptionsResult.error) {
-          throw new Error(prescriptionsResult.error.message);
-        }
-
-        vitalRows = (vitalsResult.data ?? []) as Vital[];
-        prescriptionRows = (prescriptionsResult.data ?? []) as Prescription[];
-      }
-
-      setHistoryVisits(
-        visits.map((visit) => ({
-          ...visit,
-          vitals: vitalRows.find((v) => v.visit_id === visit.id) ?? null,
-          prescriptions: prescriptionRows.filter(
-            (p) => p.visit_id === visit.id
-          ),
-        }))
-      );
-    } catch (err) {
-      setError("Patient history failed: " + readableError(err));
-    } finally {
-      setHistoryLoading(false);
-    }
-  }
-
-  async function createVisit(patientId: string) {
-    const visitDate = getLocalDate();
-
-    const { data: latest, error: latestError } = await supabase
-      .from("visits")
-      .select("queue_no")
-      .eq("visit_date", visitDate)
-      .order("queue_no", { ascending: false })
-      .limit(1);
-
-    if (latestError) throw new Error("Queue number: " + latestError.message);
-
-    const nextQueue = (latest?.[0]?.queue_no ?? 0) + 1;
-
-    const { data: visit, error: visitError } = await supabase
-      .from("visits")
-      .insert({
-        patient_id: patientId,
-        visit_date: visitDate,
-        queue_no: nextQueue,
-        status: "waiting",
-      })
-      .select("id")
-      .single();
-
-    if (visitError) throw new Error("Visit: " + visitError.message);
-
-    const hasVitals = Boolean(
-      bp.trim() ||
-        pulse.trim() ||
-        spo2.trim() ||
-        weight.trim() ||
-        bloodSugar.trim()
-    );
-
-    if (hasVitals) {
-      const { error: vitalError } = await supabase.from("vitals").insert({
-        visit_id: visit.id,
-        bp: bp.trim() || null,
-        pulse: pulse.trim() ? Number(pulse) : null,
-        spo2: spo2.trim() ? Number(spo2) : null,
-        weight: weight.trim() ? Number(weight) : null,
-        blood_sugar: bloodSugar.trim() ? Number(bloodSugar) : null,
-      });
-
-      if (vitalError) {
-        throw new Error(
-          `Visit #${nextQueue} created, but vitals could not be saved: ${vitalError.message}`
-        );
-      }
+      setHistoryVisits(rows);
     }
 
-    return nextQueue;
-  }
-
-  async function addPatient(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setError("");
-    setMessage("");
-
-    if (!name.trim()) {
-      setError("Please enter the patient's name.");
-      return;
-    }
-
-    for (const [label, value] of [
-      ["Age", age],
-      ["Pulse", pulse],
-      ["SpO2", spo2],
-      ["Weight", weight],
-      ["Blood Sugar", bloodSugar],
-    ]) {
-      if (
-        value.trim() &&
-        (!Number.isFinite(Number(value)) || Number(value) < 0)
-      ) {
-        setError(`Please enter a valid ${label}.`);
-        return;
-      }
-    }
-
-    if (spo2.trim() && Number(spo2) > 100) {
-      setError("SpO2 cannot be greater than 100.");
-      return;
-    }
-
-    setSaving(true);
-
-    try {
-      let patientId: string;
-      let patientCode = "";
-
-      if (selectedPatient) {
-        patientId = selectedPatient.id;
-        patientCode = selectedPatient.patient_code;
-      } else {
-        const { data: patient, error: patientError } = await supabase
-          .from("patients")
-          .insert({
-            name: name.trim(),
-            age: age.trim() ? Number(age) : null,
-            gender: gender || null,
-            phone: phone.trim() || null,
-          })
-          .select("id, patient_code")
-          .single();
-
-        if (patientError) throw new Error("Patient: " + patientError.message);
-
-        patientId = patient.id;
-        patientCode = patient.patient_code;
-      }
-
-      const nextQueue = await createVisit(patientId);
-
-      setMessage(
-        `Visit created successfully! Patient ID: ${patientCode}. Queue number: ${nextQueue}.`
-      );
-
-      clearSelectedPatient();
-      setSearchTerm("");
-      setSearchResults([]);
-      await loadData();
-    } catch (err) {
-      console.error("Add patient/visit error:", err);
-      setError(readableError(err));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function sendToPatientRoom(visit: Visit) {
-    if (!today) return;
-
-    setError("");
-    setMessage("");
-
-    if (visit.status !== "waiting") {
-      setError("Sirf waiting status wale patient ko Patient Room bhej sakte hain.");
-      return;
-    }
-
-    const confirmed = window.confirm(
-      `Queue #${visit.queue_no} — ${visit.patients?.name ?? "Patient"} ko Patient Room mein bhejna hai?`
-    );
-
-    if (!confirmed) return;
-
-    setSendingVisitId(visit.id);
-
-    try {
-      const { data: activeVisits, error: activeError } = await supabase
-        .from("visits")
-        .select("id, queue_no, patients(name)")
-        .eq("visit_date", today)
-        .eq("status", "in-consultation")
-        .neq("id", visit.id)
-        .limit(1);
-
-      if (activeError) throw new Error(activeError.message);
-
-      if (activeVisits && activeVisits.length > 0) {
-        const active = activeVisits[0] as unknown as {
-          queue_no: number;
-          patients: { name: string } | null;
-        };
-
-        throw new Error(
-          `Queue #${active.queue_no} (${active.patients?.name ?? "Patient"}) already consultation mein hai. Pehle current consultation complete karwao.`
-        );
-      }
-
-      const { data: updatedRows, error: updateError } = await supabase
-        .from("visits")
-        .update({ status: "in-consultation" })
-        .eq("id", visit.id)
-        .eq("visit_date", today)
-        .eq("status", "waiting")
-        .select("id");
-
-      if (updateError) throw new Error(updateError.message);
-
-      if (!updatedRows || updatedRows.length === 0) {
-        throw new Error(
-          "Patient ka status update nahi hua. Queue refresh karke dobara check karo."
-        );
-      }
-
-      setMessage(
-        `Queue #${visit.queue_no} — ${visit.patients?.name ?? "Patient"} ko Patient Room ke liye bhej diya gaya.`
-      );
-
-      await loadData();
-    } catch (err) {
-      setError("Patient Room: " + readableError(err));
-    } finally {
-      setSendingVisitId(null);
-    }
+    setHistoryLoading(false);
   }
 
   function printVisit(visit: Visit) {
     const patient = visit.patients;
     const vital = visit.vitals;
+    const prescriptions = visit.prescriptions ?? [];
 
-    const prescriptionsHtml = visit.prescriptions.length
-      ? visit.prescriptions
-          .map((p) => {
-            const doctorName = safeText(p.doctor_name);
-            const doctorQualification = safeText(p.doctor_qualification);
-            const doctorRegNo = safeText(p.doctor_reg_no);
-
-            return `
-              <section class="prescription-section">
-                <h2>Clinical Assessment & Prescription</h2>
-                <h3>Diagnosis</h3>
-                <div class="content">${escapeHtml(safeText(p.diagnosis))}</div>
-                <h3>Medicines / Dosage / Duration / Instructions</h3>
-                <div class="content">${escapeHtml(safeText(p.medicines))}</div>
-                <h3>Investigations</h3>
-                <div class="content">${escapeHtml(safeText(p.investigations))}</div>
-                <h3>Advice / Follow-up</h3>
-                <div class="content">${escapeHtml(safeText(p.advice ?? p.notes))}</div>
-
-                <div class="doctor-block">
-                  <div class="doctor-signature">
-                    <p class="doctor-name">${escapeHtml(doctorName)}</p>
-                    <p>${escapeHtml(doctorQualification)}</p>
-                    <p>Registration No.: ${escapeHtml(doctorRegNo)}</p>
-                    <div class="signature-line">Signature</div>
-                  </div>
-                </div>
-              </section>
-            `;
-          })
-          .join('<hr class="separator" />')
-      : "<p>No prescription has been saved for this visit yet.</p>";
+    const prescriptionHtml = prescriptions.length
+      ? prescriptions
+          .map(
+            (p) => `
+              <div class="prescription">
+                <h3>Prescription</h3>
+                <p><b>Diagnosis:</b> ${safeText(p.diagnosis)}</p>
+                <p><b>Medicines / Dosage / Duration:</b></p>
+                <pre>${safeText(p.medicines)}</pre>
+                <p><b>Investigations:</b></p>
+                <pre>${safeText(p.investigations)}</pre>
+                <p><b>Advice:</b> ${safeText(p.advice ?? p.notes)}</p>
+                <hr />
+                <p><b>Doctor:</b> ${safeText(p.doctor_name)}</p>
+                <p><b>Qualification:</b> ${safeText(p.doctor_qualification)}</p>
+                <p><b>Registration No.:</b> ${safeText(p.doctor_reg_no)}</p>
+              </div>
+            `
+          )
+          .join("")
+      : "<p>No prescription saved for this visit.</p>";
 
     const html = `
       <!DOCTYPE html>
       <html>
       <head>
-        <meta charset="UTF-8" />
-        <title>Clinic Prescription</title>
+        <title>Patient Prescription</title>
         <style>
-          * { box-sizing: border-box; }
-          body {
-            font-family: Arial, Helvetica, sans-serif;
-            color: #111827;
-            margin: 0 auto;
-            padding: 28px;
-            max-width: 850px;
-            font-size: 13px;
-            line-height: 1.5;
-          }
-          .clinic-header {
-            text-align: center;
-            border-bottom: 2px solid #111827;
-            padding-bottom: 12px;
-            margin-bottom: 16px;
-          }
-          .clinic-header h1 { margin: 0 0 4px; font-size: 25px; }
-          .clinic-header p { margin: 2px 0; }
-          h2 {
-            font-size: 17px;
-            margin: 18px 0 8px;
-            border-bottom: 1px solid #9ca3af;
-            padding-bottom: 5px;
-          }
-          h3 { font-size: 13px; margin: 12px 0 4px; }
-          p { margin: 4px 0; }
-          .meta, .patient-grid, .vitals-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 7px 18px;
-          }
-          .panel {
-            border: 1px solid #d1d5db;
-            padding: 10px 12px;
-            border-radius: 5px;
-            margin: 10px 0;
-          }
-          .content {
-            white-space: pre-wrap;
-            overflow-wrap: anywhere;
-            padding: 4px 0 8px;
-          }
-          .doctor-block {
-            margin-top: 25px;
-            display: flex;
-            justify-content: flex-end;
-          }
-          .doctor-signature {
-            min-width: 220px;
-            text-align: center;
-            padding-top: 8px;
-          }
-          .doctor-name {
-            font-weight: bold;
-            font-size: 15px;
-          }
-          .signature-line {
-            border-top: 1px solid #111;
-            padding-top: 5px;
-            margin-top: 35px;
-          }
-          .separator {
-            border: 0;
-            border-top: 1px dashed #9ca3af;
-            margin: 22px 0;
-          }
-          .footer {
-            margin-top: 28px;
-            border-top: 1px solid #d1d5db;
-            padding-top: 10px;
-          }
-          @media print {
-            body { padding: 8mm; max-width: none; }
-            .panel, .prescription-section { break-inside: avoid; }
-          }
+          body { font-family: Arial, sans-serif; color: #111; padding: 24px; }
+          h1 { text-align: center; margin-bottom: 4px; }
+          h2 { text-align: center; margin-top: 0; font-size: 16px; }
+          h3 { margin-bottom: 8px; }
+          .line { border-top: 1px solid #333; margin: 14px 0; }
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+          .prescription { margin-top: 20px; }
+          pre { white-space: pre-wrap; font-family: Arial, sans-serif; }
+          @media print { button { display: none; } body { padding: 10px; } }
         </style>
       </head>
       <body>
-        <header class="clinic-header">
-          <h1>DRISHYAM CLINIC</h1>
-          <p>Patient Consultation & Prescription</p>
-        </header>
-
-        <div class="meta">
-          <p><b>Patient ID:</b> ${escapeHtml(patient?.patient_code ?? "—")}</p>
-          <p><b>Visit Date:</b> ${escapeHtml(visit.visit_date)}</p>
-          <p><b>Visit ID:</b> ${escapeHtml(visit.id)}</p>
-          <p><b>Queue Number:</b> ${escapeHtml(String(visit.queue_no))}</p>
+        <h1>DRISHYAM CLINIC</h1>
+        <h2>Patient Consultation Record</h2>
+        <div class="line"></div>
+        <div class="grid">
+          <p><b>Patient:</b> ${safeText(patient?.name)}</p>
+          <p><b>Patient ID:</b> ${safeText(patient?.patient_code)}</p>
+          <p><b>Age / Gender:</b> ${safeText(patient?.age)} / ${safeText(patient?.gender)}</p>
+          <p><b>Phone:</b> ${safeText(patient?.phone)}</p>
+          <p><b>Date:</b> ${safeText(visit.visit_date)}</p>
+          <p><b>Queue Token:</b> #${safeText(visit.queue_no)}</p>
         </div>
-
-        <div class="panel">
-          <h2>Patient Details</h2>
-          <div class="patient-grid">
-            <p><b>Name:</b> ${escapeHtml(patient?.name ?? "—")}</p>
-            <p><b>Age:</b> ${escapeHtml(String(patient?.age ?? "—"))}</p>
-            <p><b>Gender:</b> ${escapeHtml(patient?.gender ?? "—")}</p>
-            <p><b>Phone:</b> ${escapeHtml(patient?.phone ?? "—")}</p>
-          </div>
+        <div class="line"></div>
+        <h3>Vitals</h3>
+        <div class="grid">
+          <p><b>BP:</b> ${safeText(vital?.bp)}</p>
+          <p><b>Pulse:</b> ${safeText(vital?.pulse)}</p>
+          <p><b>SpO₂:</b> ${vital?.spo2 != null ? `${vital.spo2}%` : "—"}</p>
+          <p><b>Weight:</b> ${vital?.weight != null ? `${vital.weight} kg` : "—"}</p>
+          <p><b>Temperature:</b> ${vital?.temperature != null ? `${vital.temperature} °C` : "—"}</p>
+          <p><b>Blood Sugar:</b> ${vital?.blood_sugar != null ? `${vital.blood_sugar} mg/dL` : "—"}</p>
         </div>
-
-        <div class="panel">
-          <h2>Vitals</h2>
-          <div class="vitals-grid">
-            <p><b>Blood Pressure:</b> ${escapeHtml(vital?.bp ?? "—")}</p>
-            <p><b>Pulse:</b> ${escapeHtml(String(vital?.pulse ?? "—"))} bpm</p>
-            <p><b>SpO₂:</b> ${escapeHtml(String(vital?.spo2 ?? "—"))}${vital?.spo2 != null ? "%" : ""}</p>
-            <p><b>Weight:</b> ${escapeHtml(String(vital?.weight ?? "—"))}${vital?.weight != null ? " kg" : ""}</p>
-            <p><b>Temperature:</b> ${escapeHtml(String(vital?.temperature ?? "—"))}${vital?.temperature != null ? " °C" : ""}</p>
-            <p><b>Blood Sugar:</b> ${escapeHtml(String(vital?.blood_sugar ?? "—"))}${vital?.blood_sugar != null ? " mg/dL" : ""}</p>
-          </div>
-        </div>
-
-        ${prescriptionsHtml}
-
-        <div class="footer">
-          <p><b>Prescription date:</b> ${escapeHtml(visit.visit_date)}</p>
-        </div>
-
-        <script>
-          window.onload = function () { window.print(); };
-        <\/script>
+        <div class="line"></div>
+        ${prescriptionHtml}
+        <script>window.onload = () => window.print();</script>
       </body>
       </html>
     `;
 
-    const win = window.open("", "_blank");
+    const printWindow = window.open("", "_blank");
 
-    if (!win) {
+    if (!printWindow) {
       setError("Please allow pop-ups to print the prescription.");
       return;
     }
 
-    win.document.open();
-    win.document.write(html);
-    win.document.close();
+    printWindow.document.open();
+    printWindow.document.write(html);
+    printWindow.document.close();
   }
 
   return (
-    <main className="min-h-screen bg-slate-100 p-4 text-slate-900 sm:p-8">
+    <main className="min-h-screen bg-slate-100 p-4 text-slate-900 md:p-6">
       <div className="mx-auto max-w-7xl space-y-6">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-3xl font-bold">Reception Dashboard</h1>
-            <p className="mt-1 text-sm text-slate-600">
-              Date: {today || "Loading date..."}
+            <p className="text-sm text-slate-600">
+              Drishyam Clinic · {today()}
             </p>
           </div>
           <button
             type="button"
-            onClick={() => void loadData()}
+            onClick={() => void loadQueue()}
             className="rounded-lg bg-slate-800 px-4 py-2 text-white"
           >
             Refresh Queue
           </button>
         </header>
 
-        {error && (
-          <div className="whitespace-pre-wrap break-words rounded-lg border border-red-300 bg-red-50 p-4 text-red-800">
-            <b>Error:</b> {error}
-          </div>
-        )}
-
         {message && (
-          <div className="whitespace-pre-wrap rounded-lg border border-green-300 bg-green-50 p-4 text-green-800">
+          <div className="rounded-lg bg-green-100 p-3 text-green-800">
             {message}
           </div>
         )}
 
+        {error && (
+          <div className="rounded-lg bg-red-100 p-3 text-red-800">
+            {error}
+          </div>
+        )}
+
         <section className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-3 text-xl font-semibold">Search Existing Patient</h2>
-          <p className="mb-3 text-sm text-slate-600">
-            Patient ID, mobile number, ya patient name se search karo.
-            Multiple matching patients hon toh correct record select karo.
-          </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
+          <h2 className="mb-4 text-xl font-bold">
+            Search Existing Patient
+          </h2>
+
+          <div className="flex flex-wrap gap-2">
             <input
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void searchPatients();
-                }
+                if (e.key === "Enter") void searchPatients();
               }}
-              className="min-w-0 flex-1 rounded-lg border p-3"
-              placeholder="e.g. DRI-000001 or mobile number"
+              placeholder="Name, phone number or Patient ID"
+              className="min-w-60 flex-1 rounded-lg border p-3"
             />
             <button
               type="button"
-              disabled={searching}
               onClick={() => void searchPatients()}
-              className="rounded-lg bg-indigo-700 px-5 py-3 font-semibold text-white disabled:opacity-50"
+              disabled={searching}
+              className="rounded-lg bg-blue-700 px-5 py-3 text-white disabled:opacity-50"
             >
-              {searching ? "Searching..." : "Search Patient"}
+              {searching ? "Searching..." : "Search"}
             </button>
           </div>
 
           {searchResults.length > 0 && (
-            <div className="mt-4 space-y-2">
-              <h3 className="font-semibold">Search Results ({searchResults.length})</h3>
+            <div className="mt-3 space-y-2">
               {searchResults.map((patient) => (
-                <div
+                <button
+                  type="button"
                   key={patient.id}
-                  className="flex flex-col justify-between gap-3 rounded-lg border p-3 sm:flex-row sm:items-center"
+                  onClick={() => choosePatient(patient)}
+                  className="block w-full rounded-lg border p-3 text-left hover:bg-slate-50"
                 >
-                  <div>
-                    <p className="font-semibold">{patient.name}</p>
-                    <p className="text-sm text-slate-600">
-                      ID: {patient.patient_code} | Phone: {patient.phone || "—"}
-                    </p>
-                    <p className="text-sm text-slate-600">
-                      Age: {patient.age ?? "—"} | Gender: {patient.gender || "—"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => selectExistingPatient(patient)}
-                      className="rounded-lg bg-blue-700 px-3 py-2 text-white"
-                    >
-                      Select for Visit
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void loadPatientHistory(patient)}
-                      className="rounded-lg bg-slate-700 px-3 py-2 text-white"
-                    >
-                      View History
-                    </button>
-                  </div>
-                </div>
+                  <b>{patient.name}</b>
+                  <span className="ml-2 text-sm text-slate-600">
+                    {patient.patient_code ?? "No Patient ID"} · Age:{" "}
+                    {patient.age ?? "—"} · {patient.phone ?? "No phone"}
+                  </span>
+                </button>
               ))}
-            </div>
-          )}
-
-          {selectedPatient && (
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-300 bg-blue-50 p-3">
-              <p>
-                Selected: <b>{selectedPatient.name}</b> —{" "}
-                <b>{selectedPatient.patient_code}</b>
-              </p>
-              <button
-                type="button"
-                onClick={clearSelectedPatient}
-                className="rounded-lg border border-blue-700 px-3 py-2 text-blue-800"
-              >
-                Clear Selection
-              </button>
             </div>
           )}
         </section>
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-4 text-xl font-semibold">
-            {selectedPatient ? "Create Repeat Visit" : "Register New Patient"} & Vitals
+          <h2 className="mb-4 text-xl font-bold">
+            {selectedPatient ? "Register Repeat Visit" : "New Patient Registration"}
           </h2>
-          <form onSubmit={addPatient} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            <label>
-              <span className="mb-1 block text-sm font-medium">Patient Name *</span>
-              <input
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                disabled={Boolean(selectedPatient)}
-                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
-                placeholder="Patient name"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Age</span>
-              <input
-                type="number"
-                min="0"
-                value={age}
-                onChange={(e) => setAge(e.target.value)}
-                disabled={Boolean(selectedPatient)}
-                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
-                placeholder="Age"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Gender</span>
-              <select
-                value={gender}
-                onChange={(e) => setGender(e.target.value)}
-                disabled={Boolean(selectedPatient)}
-                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
-              >
-                <option>Male</option>
-                <option>Female</option>
-                <option>Other</option>
-              </select>
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Phone</span>
-              <input
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                disabled={Boolean(selectedPatient)}
-                className="w-full rounded-lg border p-3 disabled:bg-slate-100"
-                placeholder="Phone number"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">BP (e.g. 120/80)</span>
-              <input
-                value={bp}
-                onChange={(e) => setBp(e.target.value)}
-                className="w-full rounded-lg border p-3"
-                placeholder="120/80"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Pulse / Heart Rate</span>
-              <input
-                type="number"
-                min="0"
-                value={pulse}
-                onChange={(e) => setPulse(e.target.value)}
-                className="w-full rounded-lg border p-3"
-                placeholder="bpm"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">SpO₂ (%)</span>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={spo2}
-                onChange={(e) => setSpo2(e.target.value)}
-                className="w-full rounded-lg border p-3"
-                placeholder="e.g. 98"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Weight (kg)</span>
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={weight}
-                onChange={(e) => setWeight(e.target.value)}
-                className="w-full rounded-lg border p-3"
-                placeholder="Weight"
-              />
-            </label>
-            <label>
-              <span className="mb-1 block text-sm font-medium">Blood Sugar (mg/dL)</span>
-              <input
-                type="number"
-                min="0"
-                step="0.1"
-                value={bloodSugar}
-                onChange={(e) => setBloodSugar(e.target.value)}
-                className="w-full rounded-lg border p-3"
-                placeholder="e.g. 110"
-              />
-            </label>
 
-            <div className="sm:col-span-2 lg:col-span-4">
+          {selectedPatient && (
+            <div className="mb-4 rounded-lg bg-blue-50 p-3">
+              Selected: <b>{selectedPatient.name}</b> ·{" "}
+              {selectedPatient.patient_code}
+              <button
+                type="button"
+                onClick={resetForm}
+                className="ml-3 text-sm font-semibold text-red-700"
+              >
+                Clear selection
+              </button>
+            </div>
+          )}
+
+          <form onSubmit={registerPatient} className="space-y-5">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+              <label className="text-sm font-medium">
+                Patient Name *
+                <input
+                  required
+                  value={patientName}
+                  onChange={(e) => setPatientName(e.target.value)}
+                  className="mt-1 w-full rounded-lg border p-3"
+                  placeholder="Full name"
+                />
+              </label>
+
+              <label className="text-sm font-medium">
+                Age
+                <input
+                  type="number"
+                  min="0"
+                  value={age}
+                  onChange={(e) => setAge(e.target.value)}
+                  className="mt-1 w-full rounded-lg border p-3"
+                  placeholder="Age"
+                />
+              </label>
+
+              <label className="text-sm font-medium">
+                Gender
+                <select
+                  value={gender}
+                  onChange={(e) => setGender(e.target.value)}
+                  className="mt-1 w-full rounded-lg border p-3"
+                >
+                  <option>Male</option>
+                  <option>Female</option>
+                  <option>Other</option>
+                </select>
+              </label>
+
+              <label className="text-sm font-medium">
+                Phone Number
+                <input
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  className="mt-1 w-full rounded-lg border p-3"
+                  placeholder="Mobile number"
+                />
+              </label>
+            </div>
+
+            <div>
+              <h3 className="mb-3 text-lg font-semibold">Patient Vitals</h3>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                <label className="text-sm font-medium">
+                  Blood Pressure (mmHg)
+                  <input
+                    value={vitals.bp}
+                    onChange={(e) => updateVital("bp", e.target.value)}
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="120/80"
+                  />
+                </label>
+
+                <label className="text-sm font-medium">
+                  Pulse (bpm)
+                  <input
+                    type="number"
+                    value={vitals.pulse}
+                    onChange={(e) => updateVital("pulse", e.target.value)}
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="72"
+                  />
+                </label>
+
+                <label className="text-sm font-medium">
+                  SpO₂ (%)
+                  <input
+                    type="number"
+                    value={vitals.spo2}
+                    onChange={(e) => updateVital("spo2", e.target.value)}
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="98"
+                  />
+                </label>
+
+                <label className="text-sm font-medium">
+                  Weight (kg)
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={vitals.weight}
+                    onChange={(e) => updateVital("weight", e.target.value)}
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="65"
+                  />
+                </label>
+
+                <label className="text-sm font-medium">
+                  Temperature (°C)
+                  <input
+                    type="number"
+                    min="25"
+                    max="45"
+                    step="0.1"
+                    value={vitals.temperature}
+                    onChange={(e) =>
+                      updateVital("temperature", e.target.value)
+                    }
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="37.0"
+                  />
+                </label>
+
+                <label className="text-sm font-medium">
+                  Blood Sugar (mg/dL)
+                  <input
+                    type="number"
+                    step="0.1"
+                    value={vitals.blood_sugar}
+                    onChange={(e) =>
+                      updateVital("blood_sugar", e.target.value)
+                    }
+                    className="mt-1 w-full rounded-lg border p-3"
+                    placeholder="100"
+                  />
+                </label>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-3">
               <button
                 type="submit"
-                disabled={saving || !today}
-                className="rounded-lg bg-blue-700 px-5 py-3 font-semibold text-white disabled:opacity-50"
+                disabled={saving}
+                className="rounded-lg bg-green-700 px-6 py-3 font-semibold text-white disabled:opacity-50"
               >
-                {saving
-                  ? "Saving..."
-                  : selectedPatient
-                    ? "Create Repeat Visit"
-                    : "Register Patient & Add to Queue"}
+                {saving ? "Registering..." : "Register Patient"}
+              </button>
+              <button
+                type="button"
+                onClick={resetForm}
+                className="rounded-lg border px-6 py-3"
+              >
+                Reset Form
               </button>
             </div>
           </form>
-          <p className="mt-3 text-xs text-slate-500">
-            Repeat visit ke liye pehle patient search karke Select for Visit dabao.
-            Bina selection ke form submit karne par naya patient record banega.
-          </p>
         </section>
 
         {historyPatient && (
@@ -1016,14 +835,18 @@ export default function ReceptionPage() {
             ) : (
               <div className="mt-4 space-y-4">
                 {historyVisits.map((visit) => (
-                  <article key={visit.id} className="rounded-lg border p-4">
-                    <div className="flex flex-wrap items-start justify-between gap-2">
+                  <article
+                    key={visit.id}
+                    className="rounded-lg border p-4"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <div>
                         <h3 className="font-bold">
                           {visit.visit_date} — Queue #{visit.queue_no}
                         </h3>
-                        <p className="break-all text-xs text-slate-500">Visit ID: {visit.id}</p>
-                        <p className="text-sm">Status: {visit.status}</p>
+                        <p className="text-sm">
+                          Status: {visit.status}
+                        </p>
                       </div>
                       <button
                         type="button"
@@ -1033,37 +856,70 @@ export default function ReceptionPage() {
                         View / Print
                       </button>
                     </div>
+
                     <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
                       <p>BP: {visit.vitals?.bp ?? "—"}</p>
                       <p>Pulse: {visit.vitals?.pulse ?? "—"}</p>
-                      <p>SpO₂: {visit.vitals?.spo2 != null ? `${visit.vitals.spo2}%` : "—"}</p>
-                      <p>Weight: {visit.vitals?.weight != null ? `${visit.vitals.weight} kg` : "—"}</p>
                       <p>
-                        Temperature: {visit.vitals?.temperature ?? "—"}
-                        {visit.vitals?.temperature != null ? " °C" : ""}
+                        SpO₂:{" "}
+                        {visit.vitals?.spo2 != null
+                          ? `${visit.vitals.spo2}%`
+                          : "—"}
                       </p>
                       <p>
-                        Blood Sugar: {visit.vitals?.blood_sugar ?? "—"}
-                        {visit.vitals?.blood_sugar != null ? " mg/dL" : ""}
+                        Weight:{" "}
+                        {visit.vitals?.weight != null
+                          ? `${visit.vitals.weight} kg`
+                          : "—"}
+                      </p>
+                      <p>
+                        Temperature:{" "}
+                        {visit.vitals?.temperature != null
+                          ? `${visit.vitals.temperature} °C`
+                          : "—"}
+                      </p>
+                      <p>
+                        Blood Sugar:{" "}
+                        {visit.vitals?.blood_sugar != null
+                          ? `${visit.vitals.blood_sugar} mg/dL`
+                          : "—"}
                       </p>
                     </div>
+
                     {visit.prescriptions.length === 0 ? (
-                      <p className="mt-3 text-sm text-slate-500">No prescription saved for this visit.</p>
+                      <p className="mt-3 text-sm text-slate-500">
+                        No prescription saved for this visit.
+                      </p>
                     ) : (
                       visit.prescriptions.map((p, index) => (
                         <div
                           key={p.id ?? `${visit.id}-${index}`}
                           className="mt-3 space-y-2 border-t pt-3 text-sm"
                         >
-                          <p><b>Diagnosis:</b> {safeText(p.diagnosis)}</p>
+                          <p>
+                            <b>Diagnosis:</b> {safeText(p.diagnosis)}
+                          </p>
                           <p><b>Medicines:</b></p>
-                          <pre className="whitespace-pre-wrap font-sans">{safeText(p.medicines)}</pre>
+                          <pre className="whitespace-pre-wrap font-sans">
+                            {safeText(p.medicines)}
+                          </pre>
                           <p><b>Investigations:</b></p>
-                          <pre className="whitespace-pre-wrap font-sans">{safeText(p.investigations)}</pre>
-                          <p><b>Advice:</b> {safeText(p.advice ?? p.notes)}</p>
+                          <pre className="whitespace-pre-wrap font-sans">
+                            {safeText(p.investigations)}
+                          </pre>
+                          <p>
+                            <b>Advice:</b>{" "}
+                            {safeText(p.advice ?? p.notes)}
+                          </p>
                           <p><b>Doctor:</b> {safeText(p.doctor_name)}</p>
-                          <p><b>Qualification:</b> {safeText(p.doctor_qualification)}</p>
-                          <p><b>Registration No.:</b> {safeText(p.doctor_reg_no)}</p>
+                          <p>
+                            <b>Qualification:</b>{" "}
+                            {safeText(p.doctor_qualification)}
+                          </p>
+                          <p>
+                            <b>Registration No.:</b>{" "}
+                            {safeText(p.doctor_reg_no)}
+                          </p>
                         </div>
                       ))
                     )}
@@ -1075,26 +931,31 @@ export default function ReceptionPage() {
         )}
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-4 text-xl font-semibold">Today&apos;s Queue ({queue.length})</h2>
+          <h2 className="mb-4 text-xl font-semibold">
+            Today&apos;s Queue ({queue.length})
+          </h2>
+
           {loading ? (
             <p>Loading queue...</p>
           ) : queue.length === 0 ? (
-            <p className="rounded-lg bg-slate-50 p-4">No patients in today&apos;s queue.</p>
+            <p className="rounded-lg bg-slate-50 p-4">
+              No patients in today&apos;s queue.
+            </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1500px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[1200px] border-collapse text-left text-sm">
                 <thead>
                   <tr className="border-b bg-slate-50">
                     <th className="p-3">Queue</th>
                     <th className="p-3">Patient ID</th>
                     <th className="p-3">Patient</th>
-                    <th className="p-3">Visit ID</th>
                     <th className="p-3">Age/Gender</th>
                     <th className="p-3">Phone</th>
                     <th className="p-3">BP</th>
                     <th className="p-3">Pulse</th>
                     <th className="p-3">SpO₂</th>
                     <th className="p-3">Weight</th>
+                    <th className="p-3">Temperature</th>
                     <th className="p-3">Blood Sugar</th>
                     <th className="p-3">Status</th>
                     <th className="p-3">Actions</th>
@@ -1103,21 +964,40 @@ export default function ReceptionPage() {
                 <tbody>
                   {queue.map((visit) => (
                     <tr key={visit.id} className="border-b last:border-0">
-                      <td className="p-3 font-semibold">#{visit.queue_no}</td>
-                      <td className="p-3">{visit.patients?.patient_code ?? "—"}</td>
-                      <td className="p-3">{visit.patients?.name ?? "Unknown"}</td>
-                      <td className="max-w-36 break-all p-3 text-xs">{visit.id}</td>
-                      <td className="p-3">
-                        {visit.patients?.age ?? "—"} / {visit.patients?.gender ?? "—"}
+                      <td className="p-3 font-semibold">
+                        #{visit.queue_no}
                       </td>
-                      <td className="p-3">{visit.patients?.phone ?? "—"}</td>
+                      <td className="p-3">
+                        {visit.patients?.patient_code ?? "—"}
+                      </td>
+                      <td className="p-3">
+                        {visit.patients?.name ?? "Unknown"}
+                      </td>
+                      <td className="p-3">
+                        {visit.patients?.age ?? "—"} /{" "}
+                        {visit.patients?.gender ?? "—"}
+                      </td>
+                      <td className="p-3">
+                        {visit.patients?.phone ?? "—"}
+                      </td>
                       <td className="p-3">{visit.vitals?.bp ?? "—"}</td>
-                      <td className="p-3">{visit.vitals?.pulse ?? "—"}</td>
                       <td className="p-3">
-                        {visit.vitals?.spo2 != null ? `${visit.vitals.spo2}%` : "—"}
+                        {visit.vitals?.pulse ?? "—"}
                       </td>
                       <td className="p-3">
-                        {visit.vitals?.weight != null ? `${visit.vitals.weight} kg` : "—"}
+                        {visit.vitals?.spo2 != null
+                          ? `${visit.vitals.spo2}%`
+                          : "—"}
+                      </td>
+                      <td className="p-3">
+                        {visit.vitals?.weight != null
+                          ? `${visit.vitals.weight} kg`
+                          : "—"}
+                      </td>
+                      <td className="p-3">
+                        {visit.vitals?.temperature != null
+                          ? `${visit.vitals.temperature} °C`
+                          : "—"}
                       </td>
                       <td className="p-3">
                         {visit.vitals?.blood_sugar != null
@@ -1131,17 +1011,23 @@ export default function ReceptionPage() {
                             <button
                               type="button"
                               disabled={sendingVisitId !== null}
-                              onClick={() => void sendToPatientRoom(visit)}
+                              onClick={() =>
+                                void sendToPatientRoom(visit)
+                              }
                               className="rounded-lg bg-blue-700 px-3 py-2 text-white disabled:opacity-50"
                             >
-                              {sendingVisitId === visit.id ? "Sending..." : "Send to Patient Room"}
+                              {sendingVisitId === visit.id
+                                ? "Sending..."
+                                : "Send to Patient Room"}
                             </button>
                           )}
+
                           {visit.status === "in-consultation" && (
-                            <span className="rounded-lg bg-emerald-100 px-3 py-2 text-center font-semibold text-emerald-800">
+                            <span className="rounded-lg bg-emerald-100 px-3 py-2 text-center text-emerald-800">
                               In Patient Room
                             </span>
                           )}
+
                           <button
                             type="button"
                             onClick={() => printVisit(visit)}
@@ -1149,10 +1035,13 @@ export default function ReceptionPage() {
                           >
                             View / Print
                           </button>
+
                           {visit.patients && (
                             <button
                               type="button"
-                              onClick={() => void loadPatientHistory(visit.patients!)}
+                              onClick={() =>
+                                void loadPatientHistory(visit.patients!)
+                              }
                               className="rounded-lg bg-slate-700 px-3 py-2 text-white"
                             >
                               History
@@ -1161,8 +1050,8 @@ export default function ReceptionPage() {
                         </div>
                         <p className="mt-1 text-xs text-slate-500">
                           {visit.prescriptions.length
-                            ? `${visit.prescriptions.length} saved`
-                            : "Not saved yet"}
+                            ? `${visit.prescriptions.length} saved prescription(s)`
+                            : "No prescription yet"}
                         </p>
                       </td>
                     </tr>
@@ -1175,6 +1064,7 @@ export default function ReceptionPage() {
 
         <section className="space-y-4">
           <h2 className="text-xl font-bold">Doctor&apos;s Prescriptions</h2>
+
           {queue.filter((v) => v.prescriptions.length > 0).length === 0 ? (
             <div className="rounded-xl bg-white p-5 text-slate-600 shadow-sm">
               No saved prescriptions found for today.
@@ -1183,14 +1073,20 @@ export default function ReceptionPage() {
             queue
               .filter((v) => v.prescriptions.length > 0)
               .map((visit) => (
-                <article key={visit.id} className="rounded-xl bg-white p-5 shadow-sm">
+                <article
+                  key={visit.id}
+                  className="rounded-xl bg-white p-5 shadow-sm"
+                >
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h3 className="text-lg font-bold">
-                        Queue #{visit.queue_no} — {visit.patients?.name ?? "Unknown"}
+                        Queue #{visit.queue_no} —{" "}
+                        {visit.patients?.name ?? "Unknown"}
                       </h3>
                       <p className="text-sm text-slate-500">
-                        Patient ID: {visit.patients?.patient_code ?? "—"} | Status: {visit.status}
+                        Patient ID:{" "}
+                        {visit.patients?.patient_code ?? "—"} | Status:{" "}
+                        {visit.status}
                       </p>
                     </div>
                     <button
@@ -1201,6 +1097,7 @@ export default function ReceptionPage() {
                       Print Prescription
                     </button>
                   </div>
+
                   {visit.prescriptions.map((p, index) => (
                     <div
                       key={p.id ?? `${visit.id}-${index}`}
@@ -1208,25 +1105,40 @@ export default function ReceptionPage() {
                     >
                       <div>
                         <h4 className="font-semibold">Diagnosis</h4>
-                        <p className="whitespace-pre-wrap">{safeText(p.diagnosis)}</p>
+                        <p className="whitespace-pre-wrap">
+                          {safeText(p.diagnosis)}
+                        </p>
                       </div>
                       <div>
-                        <h4 className="font-semibold">Medicines / Dosage / Duration / Instructions</h4>
-                        <pre className="whitespace-pre-wrap font-sans">{safeText(p.medicines)}</pre>
+                        <h4 className="font-semibold">
+                          Medicines / Dosage / Duration / Instructions
+                        </h4>
+                        <pre className="whitespace-pre-wrap font-sans">
+                          {safeText(p.medicines)}
+                        </pre>
                       </div>
                       <div>
                         <h4 className="font-semibold">Investigations</h4>
-                        <pre className="whitespace-pre-wrap font-sans">{safeText(p.investigations)}</pre>
+                        <pre className="whitespace-pre-wrap font-sans">
+                          {safeText(p.investigations)}
+                        </pre>
                       </div>
                       <div>
                         <h4 className="font-semibold">Advice / Notes</h4>
-                        <p className="whitespace-pre-wrap">{safeText(p.advice ?? p.notes)}</p>
+                        <p className="whitespace-pre-wrap">
+                          {safeText(p.advice ?? p.notes)}
+                        </p>
                       </div>
                       <div>
                         <h4 className="font-semibold">Doctor Details</h4>
                         <p>Name: {safeText(p.doctor_name)}</p>
-                        <p>Qualification: {safeText(p.doctor_qualification)}</p>
-                        <p>Registration No.: {safeText(p.doctor_reg_no)}</p>
+                        <p>
+                          Qualification:{" "}
+                          {safeText(p.doctor_qualification)}
+                        </p>
+                        <p>
+                          Registration No.: {safeText(p.doctor_reg_no)}
+                        </p>
                       </div>
                     </div>
                   ))}
