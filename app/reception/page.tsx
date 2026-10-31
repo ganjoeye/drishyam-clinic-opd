@@ -21,6 +21,7 @@ type Vital = {
   pulse: number | null;
   spo2: number | null;
   temperature?: number | null;
+  blood_sugar?: number | null;
 };
 
 type Prescription = {
@@ -89,12 +90,14 @@ export default function ReceptionPage() {
   const [pulse, setPulse] = useState("");
   const [spo2, setSpo2] = useState("");
   const [weight, setWeight] = useState("");
+  const [bloodSugar, setBloodSugar] = useState("");
 
   const [queue, setQueue] = useState<Visit[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [sendingVisitId, setSendingVisitId] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState("");
   const [searchResults, setSearchResults] = useState<Patient[]>([]);
@@ -131,7 +134,9 @@ export default function ReceptionPage() {
       if (ids.length > 0) {
         const { data: vitalData, error: vitalError } = await supabase
           .from("vitals")
-          .select("id, visit_id, bp, weight, pulse, spo2, temperature")
+          .select(
+            "id, visit_id, bp, weight, pulse, spo2, temperature, blood_sugar"
+          )
           .in("visit_id", ids);
 
         if (vitalError) throw new Error("Vitals: " + vitalError.message);
@@ -210,6 +215,7 @@ export default function ReceptionPage() {
     setPulse("");
     setSpo2("");
     setWeight("");
+    setBloodSugar("");
   }
 
   function clearSelectedPatient() {
@@ -324,13 +330,14 @@ export default function ReceptionPage() {
         const [vitalsResult, prescriptionsResult] = await Promise.all([
           supabase
             .from("vitals")
-            .select("id, visit_id, bp, weight, pulse, spo2, temperature")
+            .select(
+              "id, visit_id, bp, weight, pulse, spo2, temperature, blood_sugar"
+            )
             .in("visit_id", ids),
           supabase.from("prescriptions").select("*").in("visit_id", ids),
         ]);
 
         if (vitalsResult.error) throw new Error(vitalsResult.error.message);
-
         if (prescriptionsResult.error) {
           throw new Error(prescriptionsResult.error.message);
         }
@@ -383,7 +390,11 @@ export default function ReceptionPage() {
     if (visitError) throw new Error("Visit: " + visitError.message);
 
     const hasVitals = Boolean(
-      bp.trim() || pulse.trim() || spo2.trim() || weight.trim()
+      bp.trim() ||
+        pulse.trim() ||
+        spo2.trim() ||
+        weight.trim() ||
+        bloodSugar.trim()
     );
 
     if (hasVitals) {
@@ -393,6 +404,7 @@ export default function ReceptionPage() {
         pulse: pulse.trim() ? Number(pulse) : null,
         spo2: spo2.trim() ? Number(spo2) : null,
         weight: weight.trim() ? Number(weight) : null,
+        blood_sugar: bloodSugar.trim() ? Number(bloodSugar) : null,
       });
 
       if (vitalError) {
@@ -420,6 +432,7 @@ export default function ReceptionPage() {
       ["Pulse", pulse],
       ["SpO2", spo2],
       ["Weight", weight],
+      ["Blood Sugar", bloodSugar],
     ]) {
       if (
         value.trim() &&
@@ -480,6 +493,75 @@ export default function ReceptionPage() {
     }
   }
 
+  async function sendToPatientRoom(visit: Visit) {
+    if (!today) return;
+
+    setError("");
+    setMessage("");
+
+    if (visit.status !== "waiting") {
+      setError("Sirf waiting status wale patient ko Patient Room bhej sakte hain.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Queue #${visit.queue_no} — ${visit.patients?.name ?? "Patient"} ko Patient Room mein bhejna hai?`
+    );
+
+    if (!confirmed) return;
+
+    setSendingVisitId(visit.id);
+
+    try {
+      const { data: activeVisits, error: activeError } = await supabase
+        .from("visits")
+        .select("id, queue_no, patients(name)")
+        .eq("visit_date", today)
+        .eq("status", "in-consultation")
+        .neq("id", visit.id)
+        .limit(1);
+
+      if (activeError) throw new Error(activeError.message);
+
+      if (activeVisits && activeVisits.length > 0) {
+        const active = activeVisits[0] as unknown as {
+          queue_no: number;
+          patients: { name: string } | null;
+        };
+
+        throw new Error(
+          `Queue #${active.queue_no} (${active.patients?.name ?? "Patient"}) already consultation mein hai. Pehle current consultation complete karwao.`
+        );
+      }
+
+      const { data: updatedRows, error: updateError } = await supabase
+        .from("visits")
+        .update({ status: "in-consultation" })
+        .eq("id", visit.id)
+        .eq("visit_date", today)
+        .eq("status", "waiting")
+        .select("id");
+
+      if (updateError) throw new Error(updateError.message);
+
+      if (!updatedRows || updatedRows.length === 0) {
+        throw new Error(
+          "Patient ka status update nahi hua. Queue refresh karke dobara check karo."
+        );
+      }
+
+      setMessage(
+        `Queue #${visit.queue_no} — ${visit.patients?.name ?? "Patient"} ko Patient Room ke liye bhej diya gaya.`
+      );
+
+      await loadData();
+    } catch (err) {
+      setError("Patient Room: " + readableError(err));
+    } finally {
+      setSendingVisitId(null);
+    }
+  }
+
   function printVisit(visit: Visit) {
     const patient = visit.patients;
     const vital = visit.vitals;
@@ -487,35 +569,29 @@ export default function ReceptionPage() {
     const prescriptionsHtml = visit.prescriptions.length
       ? visit.prescriptions
           .map((p) => {
-            const medicines = safeText(p.medicines);
-            const investigations = safeText(p.investigations);
-            const advice = safeText(p.advice ?? p.notes);
+            const doctorName = safeText(p.doctor_name);
+            const doctorQualification = safeText(p.doctor_qualification);
+            const doctorRegNo = safeText(p.doctor_reg_no);
 
             return `
               <section class="prescription-section">
                 <h2>Clinical Assessment & Prescription</h2>
-
                 <h3>Diagnosis</h3>
                 <div class="content">${escapeHtml(safeText(p.diagnosis))}</div>
-
                 <h3>Medicines / Dosage / Duration / Instructions</h3>
-                <div class="content">${escapeHtml(medicines)}</div>
-
+                <div class="content">${escapeHtml(safeText(p.medicines))}</div>
                 <h3>Investigations</h3>
-                <div class="content">${escapeHtml(investigations)}</div>
-
+                <div class="content">${escapeHtml(safeText(p.investigations))}</div>
                 <h3>Advice / Follow-up</h3>
-                <div class="content">${escapeHtml(advice)}</div>
+                <div class="content">${escapeHtml(safeText(p.advice ?? p.notes))}</div>
 
                 <div class="doctor-block">
-                  <h3>Prescribing Doctor</h3>
-                  <p><b>Name:</b> ${escapeHtml(safeText(p.doctor_name))}</p>
-                  <p><b>Qualification:</b> ${escapeHtml(
-                    safeText(p.doctor_qualification)
-                  )}</p>
-                  <p><b>Registration No.:</b> ${escapeHtml(
-                    safeText(p.doctor_reg_no)
-                  )}</p>
+                  <div class="doctor-signature">
+                    <p class="doctor-name">${escapeHtml(doctorName)}</p>
+                    <p>${escapeHtml(doctorQualification)}</p>
+                    <p>Registration No.: ${escapeHtml(doctorRegNo)}</p>
+                    <div class="signature-line">Signature</div>
+                  </div>
                 </div>
               </section>
             `;
@@ -546,10 +622,7 @@ export default function ReceptionPage() {
             padding-bottom: 12px;
             margin-bottom: 16px;
           }
-          .clinic-header h1 {
-            margin: 0 0 4px;
-            font-size: 25px;
-          }
+          .clinic-header h1 { margin: 0 0 4px; font-size: 25px; }
           .clinic-header p { margin: 2px 0; }
           h2 {
             font-size: 17px;
@@ -557,10 +630,7 @@ export default function ReceptionPage() {
             border-bottom: 1px solid #9ca3af;
             padding-bottom: 5px;
           }
-          h3 {
-            font-size: 13px;
-            margin: 12px 0 4px;
-          }
+          h3 { font-size: 13px; margin: 12px 0 4px; }
           p { margin: 4px 0; }
           .meta, .patient-grid, .vitals-grid {
             display: grid;
@@ -579,9 +649,23 @@ export default function ReceptionPage() {
             padding: 4px 0 8px;
           }
           .doctor-block {
-            margin-top: 20px;
-            padding-top: 10px;
-            border-top: 1px solid #9ca3af;
+            margin-top: 25px;
+            display: flex;
+            justify-content: flex-end;
+          }
+          .doctor-signature {
+            min-width: 220px;
+            text-align: center;
+            padding-top: 8px;
+          }
+          .doctor-name {
+            font-weight: bold;
+            font-size: 15px;
+          }
+          .signature-line {
+            border-top: 1px solid #111;
+            padding-top: 5px;
+            margin-top: 35px;
           }
           .separator {
             border: 0;
@@ -590,21 +674,12 @@ export default function ReceptionPage() {
           }
           .footer {
             margin-top: 28px;
-            display: flex;
-            justify-content: space-between;
-            gap: 30px;
-          }
-          .signature {
-            width: 210px;
-            border-top: 1px solid #111;
-            padding-top: 6px;
-            text-align: center;
-            margin-top: 35px;
+            border-top: 1px solid #d1d5db;
+            padding-top: 10px;
           }
           @media print {
             body { padding: 8mm; max-width: none; }
-            .panel { break-inside: avoid; }
-            .prescription-section { break-inside: avoid; }
+            .panel, .prescription-section { break-inside: avoid; }
           }
         </style>
       </head>
@@ -615,9 +690,7 @@ export default function ReceptionPage() {
         </header>
 
         <div class="meta">
-          <p><b>Patient ID:</b> ${escapeHtml(
-            patient?.patient_code ?? "—"
-          )}</p>
+          <p><b>Patient ID:</b> ${escapeHtml(patient?.patient_code ?? "—")}</p>
           <p><b>Visit Date:</b> ${escapeHtml(visit.visit_date)}</p>
           <p><b>Visit ID:</b> ${escapeHtml(visit.id)}</p>
           <p><b>Queue Number:</b> ${escapeHtml(String(visit.queue_no))}</p>
@@ -637,18 +710,11 @@ export default function ReceptionPage() {
           <h2>Vitals</h2>
           <div class="vitals-grid">
             <p><b>Blood Pressure:</b> ${escapeHtml(vital?.bp ?? "—")}</p>
-            <p><b>Pulse:</b> ${escapeHtml(
-              String(vital?.pulse ?? "—")
-            )} bpm</p>
-            <p><b>SpO₂:</b> ${escapeHtml(
-              String(vital?.spo2 ?? "—")
-            )}${vital?.spo2 != null ? "%" : ""}</p>
-            <p><b>Weight:</b> ${escapeHtml(
-              String(vital?.weight ?? "—")
-            )}${vital?.weight != null ? " kg" : ""}</p>
-            <p><b>Temperature:</b> ${escapeHtml(
-              String(vital?.temperature ?? "—")
-            )}${vital?.temperature != null ? " °C" : ""}</p>
+            <p><b>Pulse:</b> ${escapeHtml(String(vital?.pulse ?? "—"))} bpm</p>
+            <p><b>SpO₂:</b> ${escapeHtml(String(vital?.spo2 ?? "—"))}${vital?.spo2 != null ? "%" : ""}</p>
+            <p><b>Weight:</b> ${escapeHtml(String(vital?.weight ?? "—"))}${vital?.weight != null ? " kg" : ""}</p>
+            <p><b>Temperature:</b> ${escapeHtml(String(vital?.temperature ?? "—"))}${vital?.temperature != null ? " °C" : ""}</p>
+            <p><b>Blood Sugar:</b> ${escapeHtml(String(vital?.blood_sugar ?? "—"))}${vital?.blood_sugar != null ? " mg/dL" : ""}</p>
           </div>
         </div>
 
@@ -656,15 +722,10 @@ export default function ReceptionPage() {
 
         <div class="footer">
           <p><b>Prescription date:</b> ${escapeHtml(visit.visit_date)}</p>
-          <div class="signature">
-            Doctor's Signature
-          </div>
         </div>
 
         <script>
-          window.onload = function () {
-            window.print();
-          };
+          window.onload = function () { window.print(); };
         <\/script>
       </body>
       </html>
@@ -714,14 +775,11 @@ export default function ReceptionPage() {
         )}
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-3 text-xl font-semibold">
-            Search Existing Patient
-          </h2>
+          <h2 className="mb-3 text-xl font-semibold">Search Existing Patient</h2>
           <p className="mb-3 text-sm text-slate-600">
             Patient ID, mobile number, ya patient name se search karo.
             Multiple matching patients hon toh correct record select karo.
           </p>
-
           <div className="flex flex-col gap-2 sm:flex-row">
             <input
               value={searchTerm}
@@ -747,10 +805,7 @@ export default function ReceptionPage() {
 
           {searchResults.length > 0 && (
             <div className="mt-4 space-y-2">
-              <h3 className="font-semibold">
-                Search Results ({searchResults.length})
-              </h3>
-
+              <h3 className="font-semibold">Search Results ({searchResults.length})</h3>
               {searchResults.map((patient) => (
                 <div
                   key={patient.id}
@@ -762,11 +817,9 @@ export default function ReceptionPage() {
                       ID: {patient.patient_code} | Phone: {patient.phone || "—"}
                     </p>
                     <p className="text-sm text-slate-600">
-                      Age: {patient.age ?? "—"} | Gender:{" "}
-                      {patient.gender || "—"}
+                      Age: {patient.age ?? "—"} | Gender: {patient.gender || "—"}
                     </p>
                   </div>
-
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
@@ -807,18 +860,11 @@ export default function ReceptionPage() {
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
           <h2 className="mb-4 text-xl font-semibold">
-            {selectedPatient ? "Create Repeat Visit" : "Register New Patient"}{" "}
-            & Vitals
+            {selectedPatient ? "Create Repeat Visit" : "Register New Patient"} & Vitals
           </h2>
-
-          <form
-            onSubmit={addPatient}
-            className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
-          >
+          <form onSubmit={addPatient} className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <label>
-              <span className="mb-1 block text-sm font-medium">
-                Patient Name *
-              </span>
+              <span className="mb-1 block text-sm font-medium">Patient Name *</span>
               <input
                 required
                 value={name}
@@ -828,7 +874,6 @@ export default function ReceptionPage() {
                 placeholder="Patient name"
               />
             </label>
-
             <label>
               <span className="mb-1 block text-sm font-medium">Age</span>
               <input
@@ -841,7 +886,6 @@ export default function ReceptionPage() {
                 placeholder="Age"
               />
             </label>
-
             <label>
               <span className="mb-1 block text-sm font-medium">Gender</span>
               <select
@@ -855,7 +899,6 @@ export default function ReceptionPage() {
                 <option>Other</option>
               </select>
             </label>
-
             <label>
               <span className="mb-1 block text-sm font-medium">Phone</span>
               <input
@@ -866,11 +909,8 @@ export default function ReceptionPage() {
                 placeholder="Phone number"
               />
             </label>
-
             <label>
-              <span className="mb-1 block text-sm font-medium">
-                BP (e.g. 120/80)
-              </span>
+              <span className="mb-1 block text-sm font-medium">BP (e.g. 120/80)</span>
               <input
                 value={bp}
                 onChange={(e) => setBp(e.target.value)}
@@ -878,11 +918,8 @@ export default function ReceptionPage() {
                 placeholder="120/80"
               />
             </label>
-
             <label>
-              <span className="mb-1 block text-sm font-medium">
-                Pulse / Heart Rate
-              </span>
+              <span className="mb-1 block text-sm font-medium">Pulse / Heart Rate</span>
               <input
                 type="number"
                 min="0"
@@ -892,7 +929,6 @@ export default function ReceptionPage() {
                 placeholder="bpm"
               />
             </label>
-
             <label>
               <span className="mb-1 block text-sm font-medium">SpO₂ (%)</span>
               <input
@@ -905,11 +941,8 @@ export default function ReceptionPage() {
                 placeholder="e.g. 98"
               />
             </label>
-
             <label>
-              <span className="mb-1 block text-sm font-medium">
-                Weight (kg)
-              </span>
+              <span className="mb-1 block text-sm font-medium">Weight (kg)</span>
               <input
                 type="number"
                 min="0"
@@ -918,6 +951,18 @@ export default function ReceptionPage() {
                 onChange={(e) => setWeight(e.target.value)}
                 className="w-full rounded-lg border p-3"
                 placeholder="Weight"
+              />
+            </label>
+            <label>
+              <span className="mb-1 block text-sm font-medium">Blood Sugar (mg/dL)</span>
+              <input
+                type="number"
+                min="0"
+                step="0.1"
+                value={bloodSugar}
+                onChange={(e) => setBloodSugar(e.target.value)}
+                className="w-full rounded-lg border p-3"
+                placeholder="e.g. 110"
               />
             </label>
 
@@ -935,11 +980,9 @@ export default function ReceptionPage() {
               </button>
             </div>
           </form>
-
           <p className="mt-3 text-xs text-slate-500">
-            Repeat visit ke liye pehle patient search karke Select for Visit
-            dabao. Bina selection ke form submit karne par naya patient record
-            banega.
+            Repeat visit ke liye pehle patient search karke Select for Visit dabao.
+            Bina selection ke form submit karne par naya patient record banega.
           </p>
         </section>
 
@@ -952,7 +995,6 @@ export default function ReceptionPage() {
                   {historyPatient.name} — {historyPatient.patient_code}
                 </p>
               </div>
-
               <button
                 type="button"
                 onClick={() => {
@@ -980,12 +1022,9 @@ export default function ReceptionPage() {
                         <h3 className="font-bold">
                           {visit.visit_date} — Queue #{visit.queue_no}
                         </h3>
-                        <p className="break-all text-xs text-slate-500">
-                          Visit ID: {visit.id}
-                        </p>
+                        <p className="break-all text-xs text-slate-500">Visit ID: {visit.id}</p>
                         <p className="text-sm">Status: {visit.status}</p>
                       </div>
-
                       <button
                         type="button"
                         onClick={() => printVisit(visit)}
@@ -994,53 +1033,37 @@ export default function ReceptionPage() {
                         View / Print
                       </button>
                     </div>
-
                     <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
                       <p>BP: {visit.vitals?.bp ?? "—"}</p>
                       <p>Pulse: {visit.vitals?.pulse ?? "—"}</p>
-                      <p>SpO₂: {visit.vitals?.spo2 ?? "—"}</p>
-                      <p>Weight: {visit.vitals?.weight ?? "—"} kg</p>
+                      <p>SpO₂: {visit.vitals?.spo2 != null ? `${visit.vitals.spo2}%` : "—"}</p>
+                      <p>Weight: {visit.vitals?.weight != null ? `${visit.vitals.weight} kg` : "—"}</p>
                       <p>
                         Temperature: {visit.vitals?.temperature ?? "—"}
                         {visit.vitals?.temperature != null ? " °C" : ""}
                       </p>
-                    </div>
-
-                    {visit.prescriptions.length === 0 ? (
-                      <p className="mt-3 text-sm text-slate-500">
-                        No prescription saved for this visit.
+                      <p>
+                        Blood Sugar: {visit.vitals?.blood_sugar ?? "—"}
+                        {visit.vitals?.blood_sugar != null ? " mg/dL" : ""}
                       </p>
+                    </div>
+                    {visit.prescriptions.length === 0 ? (
+                      <p className="mt-3 text-sm text-slate-500">No prescription saved for this visit.</p>
                     ) : (
                       visit.prescriptions.map((p, index) => (
                         <div
                           key={p.id ?? `${visit.id}-${index}`}
                           className="mt-3 space-y-2 border-t pt-3 text-sm"
                         >
-                          <p>
-                            <b>Diagnosis:</b> {safeText(p.diagnosis)}
-                          </p>
+                          <p><b>Diagnosis:</b> {safeText(p.diagnosis)}</p>
                           <p><b>Medicines:</b></p>
-                          <pre className="whitespace-pre-wrap font-sans">
-                            {safeText(p.medicines)}
-                          </pre>
+                          <pre className="whitespace-pre-wrap font-sans">{safeText(p.medicines)}</pre>
                           <p><b>Investigations:</b></p>
-                          <pre className="whitespace-pre-wrap font-sans">
-                            {safeText(p.investigations)}
-                          </pre>
-                          <p>
-                            <b>Advice:</b> {safeText(p.advice ?? p.notes)}
-                          </p>
-                          <p>
-                            <b>Doctor:</b> {safeText(p.doctor_name)}
-                          </p>
-                          <p>
-                            <b>Qualification:</b>{" "}
-                            {safeText(p.doctor_qualification)}
-                          </p>
-                          <p>
-                            <b>Registration No.:</b>{" "}
-                            {safeText(p.doctor_reg_no)}
-                          </p>
+                          <pre className="whitespace-pre-wrap font-sans">{safeText(p.investigations)}</pre>
+                          <p><b>Advice:</b> {safeText(p.advice ?? p.notes)}</p>
+                          <p><b>Doctor:</b> {safeText(p.doctor_name)}</p>
+                          <p><b>Qualification:</b> {safeText(p.doctor_qualification)}</p>
+                          <p><b>Registration No.:</b> {safeText(p.doctor_reg_no)}</p>
                         </div>
                       ))
                     )}
@@ -1052,19 +1075,14 @@ export default function ReceptionPage() {
         )}
 
         <section className="rounded-xl bg-white p-5 shadow-sm">
-          <h2 className="mb-4 text-xl font-semibold">
-            Today&apos;s Queue ({queue.length})
-          </h2>
-
+          <h2 className="mb-4 text-xl font-semibold">Today&apos;s Queue ({queue.length})</h2>
           {loading ? (
             <p>Loading queue...</p>
           ) : queue.length === 0 ? (
-            <p className="rounded-lg bg-slate-50 p-4">
-              No patients in today&apos;s queue.
-            </p>
+            <p className="rounded-lg bg-slate-50 p-4">No patients in today&apos;s queue.</p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1400px] border-collapse text-left text-sm">
+              <table className="w-full min-w-[1500px] border-collapse text-left text-sm">
                 <thead>
                   <tr className="border-b bg-slate-50">
                     <th className="p-3">Queue</th>
@@ -1077,46 +1095,53 @@ export default function ReceptionPage() {
                     <th className="p-3">Pulse</th>
                     <th className="p-3">SpO₂</th>
                     <th className="p-3">Weight</th>
+                    <th className="p-3">Blood Sugar</th>
                     <th className="p-3">Status</th>
                     <th className="p-3">Actions</th>
                   </tr>
                 </thead>
-
                 <tbody>
                   {queue.map((visit) => (
                     <tr key={visit.id} className="border-b last:border-0">
                       <td className="p-3 font-semibold">#{visit.queue_no}</td>
+                      <td className="p-3">{visit.patients?.patient_code ?? "—"}</td>
+                      <td className="p-3">{visit.patients?.name ?? "Unknown"}</td>
+                      <td className="max-w-36 break-all p-3 text-xs">{visit.id}</td>
                       <td className="p-3">
-                        {visit.patients?.patient_code ?? "—"}
+                        {visit.patients?.age ?? "—"} / {visit.patients?.gender ?? "—"}
                       </td>
-                      <td className="p-3">
-                        {visit.patients?.name ?? "Unknown"}
-                      </td>
-                      <td className="max-w-36 break-all p-3 text-xs">
-                        {visit.id}
-                      </td>
-                      <td className="p-3">
-                        {visit.patients?.age ?? "—"} /{" "}
-                        {visit.patients?.gender ?? "—"}
-                      </td>
-                      <td className="p-3">
-                        {visit.patients?.phone ?? "—"}
-                      </td>
+                      <td className="p-3">{visit.patients?.phone ?? "—"}</td>
                       <td className="p-3">{visit.vitals?.bp ?? "—"}</td>
                       <td className="p-3">{visit.vitals?.pulse ?? "—"}</td>
                       <td className="p-3">
-                        {visit.vitals?.spo2 != null
-                          ? `${visit.vitals.spo2}%`
-                          : "—"}
+                        {visit.vitals?.spo2 != null ? `${visit.vitals.spo2}%` : "—"}
                       </td>
                       <td className="p-3">
-                        {visit.vitals?.weight != null
-                          ? `${visit.vitals.weight} kg`
+                        {visit.vitals?.weight != null ? `${visit.vitals.weight} kg` : "—"}
+                      </td>
+                      <td className="p-3">
+                        {visit.vitals?.blood_sugar != null
+                          ? `${visit.vitals.blood_sugar} mg/dL`
                           : "—"}
                       </td>
                       <td className="p-3">{visit.status}</td>
                       <td className="p-3">
                         <div className="flex flex-col gap-2">
+                          {visit.status === "waiting" && (
+                            <button
+                              type="button"
+                              disabled={sendingVisitId !== null}
+                              onClick={() => void sendToPatientRoom(visit)}
+                              className="rounded-lg bg-blue-700 px-3 py-2 text-white disabled:opacity-50"
+                            >
+                              {sendingVisitId === visit.id ? "Sending..." : "Send to Patient Room"}
+                            </button>
+                          )}
+                          {visit.status === "in-consultation" && (
+                            <span className="rounded-lg bg-emerald-100 px-3 py-2 text-center font-semibold text-emerald-800">
+                              In Patient Room
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={() => printVisit(visit)}
@@ -1124,20 +1149,16 @@ export default function ReceptionPage() {
                           >
                             View / Print
                           </button>
-
                           {visit.patients && (
                             <button
                               type="button"
-                              onClick={() =>
-                                void loadPatientHistory(visit.patients!)
-                              }
+                              onClick={() => void loadPatientHistory(visit.patients!)}
                               className="rounded-lg bg-slate-700 px-3 py-2 text-white"
                             >
                               History
                             </button>
                           )}
                         </div>
-
                         <p className="mt-1 text-xs text-slate-500">
                           {visit.prescriptions.length
                             ? `${visit.prescriptions.length} saved`
@@ -1154,7 +1175,6 @@ export default function ReceptionPage() {
 
         <section className="space-y-4">
           <h2 className="text-xl font-bold">Doctor&apos;s Prescriptions</h2>
-
           {queue.filter((v) => v.prescriptions.length > 0).length === 0 ? (
             <div className="rounded-xl bg-white p-5 text-slate-600 shadow-sm">
               No saved prescriptions found for today.
@@ -1163,22 +1183,16 @@ export default function ReceptionPage() {
             queue
               .filter((v) => v.prescriptions.length > 0)
               .map((visit) => (
-                <article
-                  key={visit.id}
-                  className="rounded-xl bg-white p-5 shadow-sm"
-                >
+                <article key={visit.id} className="rounded-xl bg-white p-5 shadow-sm">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
                       <h3 className="text-lg font-bold">
-                        Queue #{visit.queue_no} —{" "}
-                        {visit.patients?.name ?? "Unknown"}
+                        Queue #{visit.queue_no} — {visit.patients?.name ?? "Unknown"}
                       </h3>
                       <p className="text-sm text-slate-500">
-                        Patient ID: {visit.patients?.patient_code ?? "—"} |
-                        Status: {visit.status}
+                        Patient ID: {visit.patients?.patient_code ?? "—"} | Status: {visit.status}
                       </p>
                     </div>
-
                     <button
                       type="button"
                       onClick={() => printVisit(visit)}
@@ -1187,7 +1201,6 @@ export default function ReceptionPage() {
                       Print Prescription
                     </button>
                   </div>
-
                   {visit.prescriptions.map((p, index) => (
                     <div
                       key={p.id ?? `${visit.id}-${index}`}
@@ -1195,34 +1208,20 @@ export default function ReceptionPage() {
                     >
                       <div>
                         <h4 className="font-semibold">Diagnosis</h4>
-                        <p className="whitespace-pre-wrap">
-                          {safeText(p.diagnosis)}
-                        </p>
+                        <p className="whitespace-pre-wrap">{safeText(p.diagnosis)}</p>
                       </div>
-
                       <div>
-                        <h4 className="font-semibold">
-                          Medicines / Dosage / Duration / Instructions
-                        </h4>
-                        <pre className="whitespace-pre-wrap font-sans">
-                          {safeText(p.medicines)}
-                        </pre>
+                        <h4 className="font-semibold">Medicines / Dosage / Duration / Instructions</h4>
+                        <pre className="whitespace-pre-wrap font-sans">{safeText(p.medicines)}</pre>
                       </div>
-
                       <div>
                         <h4 className="font-semibold">Investigations</h4>
-                        <pre className="whitespace-pre-wrap font-sans">
-                          {safeText(p.investigations)}
-                        </pre>
+                        <pre className="whitespace-pre-wrap font-sans">{safeText(p.investigations)}</pre>
                       </div>
-
                       <div>
                         <h4 className="font-semibold">Advice / Notes</h4>
-                        <p className="whitespace-pre-wrap">
-                          {safeText(p.advice ?? p.notes)}
-                        </p>
+                        <p className="whitespace-pre-wrap">{safeText(p.advice ?? p.notes)}</p>
                       </div>
-
                       <div>
                         <h4 className="font-semibold">Doctor Details</h4>
                         <p>Name: {safeText(p.doctor_name)}</p>

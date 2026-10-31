@@ -16,6 +16,7 @@ type Vital = {
   weight: number | null;
   pulse: number | null;
   spo2: number | null;
+  blood_sugar: number | null;
 };
 
 type Visit = {
@@ -128,6 +129,7 @@ export default function DoctorDashboard() {
   const [weight, setWeight] = useState("");
   const [pulse, setPulse] = useState("");
   const [spo2, setSpo2] = useState("");
+  const [bloodSugar, setBloodSugar] = useState("");
 
   const [medicineSearch, setMedicineSearch] = useState("");
   const [selectedMedicine, setSelectedMedicine] = useState("");
@@ -150,11 +152,15 @@ export default function DoctorDashboard() {
   const [isLoadingQueue, setIsLoadingQueue] = useState(false);
   const [queueDate, setQueueDate] = useState("");
 
-  // Dedicated doctor stream. Do not add the room parameter here.
   const doctorStreamId = "DrishyamDoctor2026";
-  const videoUrl =
+  const doctorVideoUrl =
     `https://vdo.ninja/?push=${doctorStreamId}&webcam&quality=0`;
 
+  const patientStreamId = "DrishyamPatient2026";
+  const patientVideoUrl =
+    `https://vdo.ninja/?view=${patientStreamId}&autoplay`;
+
+  // LOAD DOCTOR PROFILE
   const loadDoctorProfile = useCallback(async () => {
     setIsLoadingProfile(true);
 
@@ -172,11 +178,18 @@ export default function DoctorDashboard() {
         throw new Error("Doctor login nahi mila. Please log in again.");
       }
 
+      console.log("DOCTOR AUTH UID:", user.id);
+
       const { data, error: profileError } = await supabase
         .from("doctor_profiles")
         .select("user_id, name, qualification, reg_no")
         .eq("user_id", user.id)
         .maybeSingle();
+
+      console.log("DOCTOR PROFILE RESULT:", {
+        data,
+        profileError,
+      });
 
       if (profileError) {
         throw new Error(
@@ -186,7 +199,7 @@ export default function DoctorDashboard() {
 
       if (!data) {
         throw new Error(
-          "Doctor profile row nahi mila. Supabase mein doctor_profiles aur RLS policy check karein."
+          "Doctor profile row nahi mila. Logged-in UID aur doctor_profiles user_id match nahi kar rahe, ya SELECT access issue hai."
         );
       }
 
@@ -209,6 +222,7 @@ export default function DoctorDashboard() {
     }
   }, []);
 
+  // LOAD TODAY'S QUEUE
   const loadDoctorQueue = useCallback(async () => {
     const today = getLocalDate();
 
@@ -220,7 +234,7 @@ export default function DoctorDashboard() {
       const { data, error: queueError } = await supabase
         .from("visits")
         .select(
-          "id, queue_no, status, visit_date, patients(name, age, gender, phone), vitals(id, bp, weight, pulse, spo2)"
+          "id, queue_no, status, visit_date, patients(name, age, gender, phone), vitals(id, bp, weight, pulse, spo2, blood_sugar)"
         )
         .eq("visit_date", today)
         .order("queue_no", { ascending: true });
@@ -274,6 +288,7 @@ export default function DoctorDashboard() {
     };
   }, [loadDoctorProfile, loadDoctorQueue]);
 
+  // RESET FORM WHEN PATIENT CHANGES
   useEffect(() => {
     const vital = selectedVisit?.vitals?.[0];
 
@@ -281,6 +296,9 @@ export default function DoctorDashboard() {
     setWeight(vital?.weight != null ? String(vital.weight) : "");
     setPulse(vital?.pulse != null ? String(vital.pulse) : "");
     setSpo2(vital?.spo2 != null ? String(vital.spo2) : "");
+    setBloodSugar(
+      vital?.blood_sugar != null ? String(vital.blood_sugar) : ""
+    );
 
     setDiagnosis("");
     setAdvice("");
@@ -293,20 +311,49 @@ export default function DoctorDashboard() {
     setShowInvestigationSuggestions(false);
   }, [selectedVisit?.id]);
 
+  // UPDATE VISIT STATUS
   async function updateStatus(visit: Visit, status: string) {
-    const { error: statusError } = await supabase
+    if (visit.status === status) {
+      setQueueMessage(
+        `Queue #${visit.queue_no} ka status pehle se ${status} hai.`
+      );
+      return;
+    }
+
+    if (status === "in-consultation") {
+      const anotherActiveVisit = visits.find(
+        (item) =>
+          item.id !== visit.id && item.status === "in-consultation"
+      );
+
+      if (anotherActiveVisit) {
+        alert(
+          `Queue #${anotherActiveVisit.queue_no} (${anotherActiveVisit.patients?.name ?? "Patient"}) pehle se consultation mein hai.`
+        );
+        return;
+      }
+    }
+
+    const { data, error: statusError } = await supabase
       .from("visits")
       .update({ status })
-      .eq("id", visit.id);
+      .eq("id", visit.id)
+      .select("id");
 
     if (statusError) {
       alert("Status update failed: " + statusError.message);
       return;
     }
 
+    if (!data || data.length === 0) {
+      alert("Status update confirm nahi hua. Queue refresh karke check karein.");
+      return;
+    }
+
     await loadDoctorQueue();
   }
 
+  // ADD MEDICINE
   function addMedicine() {
     const name = selectedMedicine || medicineSearch.trim();
 
@@ -325,6 +372,7 @@ export default function DoctorDashboard() {
     setShowMedicineSuggestions(false);
   }
 
+  // ADD INVESTIGATION
   function addInvestigation(name?: string) {
     const value = (name ?? investigationSearch).trim();
 
@@ -347,6 +395,7 @@ export default function DoctorDashboard() {
     setShowInvestigationSuggestions(false);
   }
 
+  // SAVE PRESCRIPTION
   async function savePrescription() {
     if (!selectedVisit || isSaving) return;
 
@@ -371,13 +420,14 @@ export default function DoctorDashboard() {
     try {
       const existingVitalId = selectedVisit.vitals?.[0]?.id;
 
-      if (bp || weight || pulse || spo2) {
+      if (bp || weight || pulse || spo2 || bloodSugar) {
         const vitalData = {
           visit_id: selectedVisit.id,
           bp: bp || null,
           weight: weight ? Number(weight) : null,
           pulse: pulse ? Number(pulse) : null,
           spo2: spo2 ? Number(spo2) : null,
+          blood_sugar: bloodSugar ? Number(bloodSugar) : null,
         };
 
         const vitalResult = existingVitalId
@@ -468,8 +518,12 @@ export default function DoctorDashboard() {
     item.toLowerCase().includes(investigationSearch.toLowerCase())
   );
 
+  const activeVisit = visits.find(
+    (visit) => visit.status === "in-consultation"
+  );
+
   return (
-    <main className="mx-auto max-w-7xl space-y-6 p-6">
+    <main className="mx-auto max-w-7xl space-y-6 p-4 sm:p-6">
       <header className="rounded-xl border bg-white p-5">
         <h1 className="text-2xl font-bold text-gray-800">
           {doctor ? `Welcome, ${doctor.name}` : "Doctor Dashboard"}
@@ -567,7 +621,40 @@ export default function DoctorDashboard() {
           </button>
         </section>
 
-        <section className="space-y-5 rounded-xl border bg-white p-5 md:col-span-2">
+        <section className="space-y-5 rounded-xl border bg-white p-4 sm:p-5 md:col-span-2">
+          <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <h2 className="font-bold text-emerald-900">
+              Current Consultation
+            </h2>
+
+            {activeVisit ? (
+              <>
+                <p className="mt-2 text-lg font-semibold text-emerald-900">
+                  Token #{activeVisit.queue_no} —{" "}
+                  {activeVisit.patients?.name ?? "Unknown Patient"}
+                </p>
+                <p className="mt-1 text-sm text-emerald-800">
+                  Reception ne is patient ko Patient Room ke liye bheja hai.
+                  Consultation ke liye isi patient ko select karein.
+                </p>
+                {selectedVisit?.id !== activeVisit.id && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedVisit(activeVisit)}
+                    className="mt-3 rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white"
+                  >
+                    Open Current Patient
+                  </button>
+                )}
+              </>
+            ) : (
+              <p className="mt-2 text-sm text-emerald-800">
+                Abhi koi patient in-consultation status mein nahi hai.
+                Reception se patient bhejne ke baad yahan naam aur token aayega.
+              </p>
+            )}
+          </div>
+
           {selectedVisit ? (
             <>
               <div>
@@ -582,21 +669,32 @@ export default function DoctorDashboard() {
                   {selectedVisit.patients?.phone ?? "N/A"}
                 </p>
 
-                <button
-                  type="button"
-                  onClick={() =>
-                    void updateStatus(selectedVisit, "in-consultation")
-                  }
-                  className="mt-3 rounded bg-blue-600 px-4 py-2 text-white"
-                >
-                  Call In
-                </button>
+                {selectedVisit.status === "waiting" ? (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void updateStatus(selectedVisit, "in-consultation")
+                    }
+                    className="mt-3 rounded bg-blue-600 px-4 py-2 text-white"
+                  >
+                    Call In
+                  </button>
+                ) : selectedVisit.status === "in-consultation" ? (
+                  <p className="mt-3 rounded-lg bg-emerald-100 p-3 text-sm font-semibold text-emerald-800">
+                    Patient Room mein active — video consultation ke liye
+                    ready.
+                  </p>
+                ) : (
+                  <p className="mt-3 rounded-lg bg-slate-100 p-3 text-sm text-slate-700">
+                    Visit status: {selectedVisit.status}
+                  </p>
+                )}
               </div>
 
               <div className="rounded-xl border bg-blue-50 p-4">
                 <h3 className="mb-3 font-bold">Patient Vitals</h3>
 
-                <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
                   <input
                     className="min-w-0 rounded border p-2"
                     placeholder="BP (e.g. 120/80)"
@@ -615,7 +713,7 @@ export default function DoctorDashboard() {
                   <input
                     className="min-w-0 rounded border p-2"
                     type="number"
-                    placeholder="Pulse"
+                    placeholder="Pulse (/min)"
                     value={pulse}
                     onChange={(event) => setPulse(event.target.value)}
                   />
@@ -627,10 +725,19 @@ export default function DoctorDashboard() {
                     value={spo2}
                     onChange={(event) => setSpo2(event.target.value)}
                   />
+
+                  <input
+                    className="min-w-0 rounded border border-emerald-400 p-2"
+                    type="number"
+                    placeholder="Blood Sugar (mg/dL)"
+                    value={bloodSugar}
+                    onChange={(event) => setBloodSugar(event.target.value)}
+                  />
                 </div>
 
                 <p className="mt-2 text-xs text-gray-600">
-                  Verify all vital readings before saving.
+                  Verify all vital readings before saving. Blood sugar is
+                  recorded in mg/dL.
                 </p>
               </div>
 
@@ -865,23 +972,68 @@ export default function DoctorDashboard() {
               Select a patient from the queue to write a prescription.
             </p>
           )}
-
-          <div>
-            <h3 className="mb-2 font-semibold">Doctor Live Video Stream</h3>
-            <p className="mb-2 text-xs text-gray-500">
-              Keep this page open during consultation. Allow camera access when
-              your browser asks for permission.
-            </p>
-
-            <iframe
-              src={videoUrl}
-              title="Doctor Live Video Stream"
-              className="h-[280px] w-full rounded-xl border-0 bg-black"
-              allow="camera; microphone; display-capture; autoplay; encrypted-media"
-            />
-          </div>
         </section>
       </div>
+
+      {/* VIDEO CONSULTATION */}
+      <section className="space-y-5 rounded-xl border bg-white p-4 sm:p-6">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-800">
+            Live Video Consultation
+          </h2>
+          <p className="mt-1 text-sm text-gray-600">
+            Doctor aur patient ki video alag windows mein. Patient Room mein
+            patient camera stream start hona chahiye.
+          </p>
+          {activeVisit && (
+            <p className="mt-2 rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">
+              Active patient: Token #{activeVisit.queue_no} —{" "}
+              {activeVisit.patients?.name ?? "Patient"}
+            </p>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <section className="overflow-hidden rounded-xl border bg-slate-950">
+            <div className="flex items-center justify-between gap-2 p-3 text-white">
+              <h3 className="font-bold">Doctor Camera</h3>
+              <span className="text-xs text-emerald-300">PUBLISHING</span>
+            </div>
+            <iframe
+              src={doctorVideoUrl}
+              title="Doctor Live Video Stream"
+              className="h-[320px] w-full border-0 bg-black"
+              allow="camera; microphone; display-capture; autoplay; encrypted-media"
+            />
+            <p className="p-3 text-xs text-slate-300">
+              Allow camera and microphone access when prompted.
+            </p>
+          </section>
+
+          <section className="overflow-hidden rounded-xl border bg-slate-950">
+            <div className="flex items-center justify-between gap-2 p-3 text-white">
+              <h3 className="font-bold">Patient Camera</h3>
+              <span className="text-xs text-blue-300">RECEIVING</span>
+            </div>
+            <iframe
+              src={patientVideoUrl}
+              title="Patient Live Video Stream"
+              className="h-[320px] w-full border-0 bg-black"
+              allow="autoplay; camera; microphone; encrypted-media"
+            />
+            <p className="p-3 text-xs text-slate-300">
+              Patient Room par patient camera start hona aur
+              DrishyamPatient2026 stream publish hona zaroori hai.
+            </p>
+          </section>
+        </div>
+
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <strong>Audio check:</strong> Two-way audio aur echo cancellation
+          abhi actual devices par test karna zaroori hai. Pehle low volume ya
+          headphones se test karein.
+        </div>
+      </section>
     </main>
   );
 }
